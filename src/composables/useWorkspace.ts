@@ -9,13 +9,41 @@ export interface FileEntry {
   children?: FileEntry[] | null
 }
 
+export interface WebDavConfig {
+  url: string
+  username: string
+  password: string
+  base_path: string | null
+}
+
 export interface Settings {
   workspace_dir: string | null
+  backend_type: string
+  webdav: WebDavConfig | null
 }
 
 export function useWorkspace() {
-  const settings = ref<Settings>({ workspace_dir: null })
+  const settings = ref<Settings>({
+    workspace_dir: null,
+    backend_type: 'Local',
+    webdav: null,
+  })
   const workspaceDir = computed(() => settings.value.workspace_dir)
+  const backendType = computed(() => settings.value.backend_type)
+  const isWebDAV = computed(() => settings.value.backend_type === 'WebDAV')
+  const isLocal = computed(() => settings.value.backend_type === 'Local')
+
+  const workspaceLabel = computed(() => {
+    if (isWebDAV.value && settings.value.webdav) {
+      return settings.value.webdav.url
+    }
+    if (workspaceDir.value) {
+      const parts = workspaceDir.value.replace(/\\/g, '/').split('/')
+      return parts[parts.length - 1] || workspaceDir.value
+    }
+    return '项目文件'
+  })
+
   const files = ref<FileEntry[]>([])
   const currentFilePath = ref<string | null>(null)
   const currentContent = ref('')
@@ -25,20 +53,9 @@ export function useWorkspace() {
 
   const isDirty = computed(() => currentContent.value !== lastSavedContent.value)
 
-  // Demo content fallback when no workspace is set
   const demoFiles: FileEntry[] = [
-    {
-      name: '欢迎文档.adoc',
-      path: '__demo__/欢迎文档.adoc',
-      is_dir: false,
-      children: null,
-    },
-    {
-      name: '学习笔记.adoc',
-      path: '__demo__/学习笔记.adoc',
-      is_dir: false,
-      children: null,
-    },
+    { name: '欢迎文档.adoc', path: '__demo__/欢迎文档.adoc', is_dir: false, children: null },
+    { name: '学习笔记.adoc', path: '__demo__/学习笔记.adoc', is_dir: false, children: null },
   ]
 
   const demoContents: Record<string, string> = {
@@ -83,12 +100,18 @@ function greeting(name) {
 `,
   }
 
+  function hasWorkspace(): boolean {
+    if (isWebDAV.value && settings.value.webdav) return true
+    if (isLocal.value && workspaceDir.value) return true
+    return false
+  }
+
   async function init() {
     try {
       const loadedSettings = await invoke<Settings>('load_settings')
       settings.value = loadedSettings
 
-      if (loadedSettings.workspace_dir) {
+      if (hasWorkspace()) {
         await loadWorkspace()
         if (files.value.length > 0) {
           const firstFile = findFirstFile(files.value)
@@ -97,7 +120,6 @@ function greeting(name) {
           }
         }
       } else {
-        // No workspace set, use demo content
         files.value = [...demoFiles]
         currentFilePath.value = demoFiles[0].path
         currentContent.value = demoContents[demoFiles[0].path] || ''
@@ -105,7 +127,6 @@ function greeting(name) {
       }
     } catch (e) {
       error.value = `初始化失败: ${e}`
-      // Fallback to demo content on error
       files.value = [...demoFiles]
       currentFilePath.value = demoFiles[0].path
       currentContent.value = demoContents[demoFiles[0].path] || ''
@@ -115,9 +136,7 @@ function greeting(name) {
 
   function findFirstFile(entries: FileEntry[]): FileEntry | null {
     for (const entry of entries) {
-      if (!entry.is_dir) {
-        return entry
-      }
+      if (!entry.is_dir) return entry
       if (entry.children && entry.children.length > 0) {
         const found = findFirstFile(entry.children)
         if (found) return found
@@ -134,17 +153,18 @@ function greeting(name) {
         title: '选择本地仓库目录',
       })
 
-      if (!selected) {
-        // User cancelled the dialog
-        return
-      }
+      if (!selected) return
 
       const dirPath = selected as string
-      settings.value = { workspace_dir: dirPath }
-      await invoke('save_settings', { settings: settings.value })
+      const newSettings: Settings = {
+        workspace_dir: dirPath,
+        backend_type: 'Local',
+        webdav: null,
+      }
+      await invoke('save_settings', { settings: newSettings })
+      settings.value = newSettings
       await loadWorkspace()
 
-      // Auto-open first file
       if (files.value.length > 0) {
         const firstFile = findFirstFile(files.value)
         if (firstFile) {
@@ -156,16 +176,38 @@ function greeting(name) {
     }
   }
 
+  async function connectWebDAV(config: WebDavConfig) {
+    error.value = null
+    isLoading.value = true
+
+    try {
+      const newSettings = await invoke<Settings>('connect_webdav', { config })
+      settings.value = newSettings
+      await loadWorkspace()
+
+      if (files.value.length > 0) {
+        const firstFile = findFirstFile(files.value)
+        if (firstFile) {
+          await openFile(firstFile.path)
+        }
+      }
+    } catch (e) {
+      error.value = `连接 WebDAV 失败: ${e}`
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function loadWorkspace() {
-    if (!workspaceDir.value) return
+    if (!hasWorkspace()) return
 
     isLoading.value = true
     error.value = null
 
     try {
-      const entries = await invoke<FileEntry[]>('list_directory', {
-        path: workspaceDir.value,
-      })
+      const path = isWebDAV.value ? '' : (workspaceDir.value || '')
+      const entries = await invoke<FileEntry[]>('list_directory', { path })
       files.value = entries
     } catch (e) {
       error.value = `加载文件列表失败: ${e}`
@@ -178,16 +220,13 @@ function greeting(name) {
   async function expandDirectory(entry: FileEntry) {
     if (!entry.is_dir) return
 
-    // If already loaded, clear children to collapse
     if (entry.children && entry.children.length > 0) {
       entry.children = []
       return
     }
 
     try {
-      const children = await invoke<FileEntry[]>('list_directory', {
-        path: entry.path,
-      })
+      const children = await invoke<FileEntry[]>('list_directory', { path: entry.path })
       entry.children = children
     } catch (e) {
       error.value = `展开目录失败: ${e}`
@@ -195,7 +234,6 @@ function greeting(name) {
   }
 
   async function openFile(path: string) {
-    // Handle demo files
     if (path.startsWith('__demo__/')) {
       currentFilePath.value = path
       currentContent.value = demoContents[path] || ''
@@ -218,8 +256,7 @@ function greeting(name) {
   async function saveCurrentFile() {
     if (!currentFilePath.value) return
     if (currentFilePath.value.startsWith('__demo__/')) {
-      // Demo files can't be saved to disk; prompt user to open a folder
-      error.value = '请先打开本地文件夹再进行保存'
+      error.value = '请先打开本地文件夹或连接 WebDAV'
       return
     }
 
@@ -237,18 +274,15 @@ function greeting(name) {
   }
 
   async function createFile(parentPath: string, name: string) {
-    if (!workspaceDir.value) {
-      error.value = '请先打开本地文件夹'
+    if (!hasWorkspace()) {
+      error.value = '请先打开文件夹或连接 WebDAV'
       return
     }
 
     error.value = null
 
     try {
-      await invoke('create_file', {
-        parentPath,
-        name,
-      })
+      await invoke('create_file', { parentPath, name })
       await refreshFileTree()
     } catch (e) {
       error.value = `创建文件失败: ${e}`
@@ -256,18 +290,15 @@ function greeting(name) {
   }
 
   async function createDirectory(parentPath: string, name: string) {
-    if (!workspaceDir.value) {
-      error.value = '请先打开本地文件夹'
+    if (!hasWorkspace()) {
+      error.value = '请先打开文件夹或连接 WebDAV'
       return
     }
 
     error.value = null
 
     try {
-      await invoke('create_directory', {
-        parentPath,
-        name,
-      })
+      await invoke('create_directory', { parentPath, name })
       await refreshFileTree()
     } catch (e) {
       error.value = `创建目录失败: ${e}`
@@ -281,7 +312,6 @@ function greeting(name) {
       await invoke('delete_file', { path })
       await refreshFileTree()
 
-      // If the deleted file was the current one, clear the editor
       if (currentFilePath.value === path) {
         currentFilePath.value = null
         currentContent.value = ''
@@ -296,10 +326,7 @@ function greeting(name) {
     error.value = null
 
     try {
-      await invoke('copy_entry', {
-        sourcePath,
-        destPath,
-      })
+      await invoke('copy_entry', { sourcePath, destPath })
       await refreshFileTree()
     } catch (e) {
       error.value = `复制失败: ${e}`
@@ -310,13 +337,9 @@ function greeting(name) {
     error.value = null
 
     try {
-      const result = await invoke<FileEntry>('rename_entry', {
-        path,
-        newName,
-      })
+      const result = await invoke<FileEntry>('rename_entry', { path, newName })
       await refreshFileTree()
 
-      // Update current path if the renamed file was current
       if (currentFilePath.value === path) {
         currentFilePath.value = result.path
       }
@@ -326,11 +349,7 @@ function greeting(name) {
   }
 
   async function refreshFileTree() {
-    // Reload the workspace root
     await loadWorkspace()
-
-    // Re-expand any previously expanded directories
-    // For simplicity, we reload the whole tree and let the user re-expand
   }
 
   function getParentPath(entryPath: string): string {
@@ -356,6 +375,10 @@ function greeting(name) {
     // State
     settings,
     workspaceDir,
+    backendType,
+    isWebDAV,
+    isLocal,
+    workspaceLabel,
     files,
     currentFilePath,
     currentContent,
@@ -366,6 +389,7 @@ function greeting(name) {
     // Methods
     init,
     pickAndSetDirectory,
+    connectWebDAV,
     loadWorkspace,
     expandDirectory,
     openFile,

@@ -7,7 +7,8 @@
           <span class="menu-label">文件</span>
           <div v-if="activeMenu === 'file'" class="dropdown">
             <div class="dropdown-item" @click="createNewFile">新建文件</div>
-            <div class="dropdown-item" @click="openFolder">打开文件夹</div>
+            <div class="dropdown-item" @click="openFolder">打开本地文件夹</div>
+            <div class="dropdown-item" @click="showWebDavDialog = true">连接 WebDAV...</div>
             <div class="dropdown-item" @click="saveFile">保存 <span class="shortcut-hint">Ctrl+S</span></div>
             <div class="dropdown-item" @click="exportFile">导出 HTML</div>
           </div>
@@ -36,6 +37,8 @@
         :files="ws.files.value"
         :current-file-path="ws.currentFilePath.value"
         :workspace-dir="ws.workspaceDir.value"
+        :workspace-label="ws.workspaceLabel.value"
+        :is-web-d-a-v="ws.isWebDAV.value"
         :is-loading="ws.isLoading.value"
         :error="ws.error.value"
         @select-file="ws.openFile"
@@ -82,6 +85,15 @@
       </main>
     </div>
 
+    <!-- WebDAV 连接对话框 -->
+    <WebDavDialog
+      :visible="showWebDavDialog"
+      :connecting="webDavConnecting"
+      :error="webDavError"
+      @close="showWebDavDialog = false; webDavError = null"
+      @connect="handleWebDavConnect"
+    />
+
     <!-- 关于对话框 -->
     <div v-if="showAbout" class="modal-overlay" @click="showAbout = false">
       <div class="modal-content about-modal" @click.stop>
@@ -109,7 +121,8 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import Asciidoctor from 'asciidoctor'
 import hljs from 'highlight.js'
 import Sidebar from './components/Sidebar.vue'
-import { useWorkspace } from './composables/useWorkspace'
+import WebDavDialog from './components/WebDavDialog.vue'
+import { useWorkspace, type WebDavConfig } from './composables/useWorkspace'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
 const asciidoctor = Asciidoctor()
@@ -120,6 +133,9 @@ const showPreview = ref(true)
 const activeMenu = ref<string | null>(null)
 const editorWidth = ref(50)
 const showAbout = ref(false)
+const showWebDavDialog = ref(false)
+const webDavConnecting = ref(false)
+const webDavError = ref<string | null>(null)
 const isDragging = ref(false)
 
 // v-model on textarea needs a writable ref; we bind to ws.currentContent
@@ -190,6 +206,19 @@ function handleKeyDown(e: KeyboardEvent) {
 
 function openFolder() {
   ws.pickAndSetDirectory()
+}
+
+async function handleWebDavConnect(config: WebDavConfig) {
+  webDavConnecting.value = true
+  webDavError.value = null
+  try {
+    await ws.connectWebDAV(config)
+    showWebDavDialog.value = false
+  } catch (e) {
+    webDavError.value = String(e)
+  } finally {
+    webDavConnecting.value = false
+  }
 }
 
 function handleDeleteFile(path: string) {

@@ -2,8 +2,8 @@
   <aside class="sidebar">
     <div class="sidebar-header">
       <span class="sidebar-title">
-        <span role="img" aria-label="Project files">📁</span>
-        {{ folderName }}
+        <span role="img" :aria-label="isWebDAV ? 'WebDAV' : 'Local'">{{ isWebDAV ? '🌐' : '📁' }}</span>
+        {{ displayName }}
       </span>
       <div class="header-actions">
         <div class="add-btn-wrapper">
@@ -113,6 +113,8 @@ const props = defineProps<{
   files: FileEntry[]
   currentFilePath: string | null
   workspaceDir: string | null
+  workspaceLabel: string
+  isWebDAV: boolean
   isLoading: boolean
   error: string | null
 }>()
@@ -129,10 +131,9 @@ const emit = defineEmits<{
   clearError: []
 }>()
 
-const folderName = computed(() => {
-  if (!props.workspaceDir) return '项目文件'
-  const parts = props.workspaceDir.replace(/\\/g, '/').split('/')
-  return parts[parts.length - 1] || props.workspaceDir
+const displayName = computed(() => {
+  if (props.workspaceLabel) return props.workspaceLabel
+  return '项目文件'
 })
 
 // Context menu state
@@ -189,16 +190,16 @@ function toggleAddMenu() {
 function handleRootNewFile() {
   showAddMenu.value = false
   const name = prompt('请输入文件名：', '新文档.adoc')
-  if (name && props.workspaceDir) {
-    emit('createFile', { parentPath: props.workspaceDir, name })
+  if (name) {
+    emit('createFile', { parentPath: props.workspaceDir || '', name })
   }
 }
 
 function handleRootNewDirectory() {
   showAddMenu.value = false
   const name = prompt('请输入目录名：', '新目录')
-  if (name && props.workspaceDir) {
-    emit('createDirectory', { parentPath: props.workspaceDir, name })
+  if (name) {
+    emit('createDirectory', { parentPath: props.workspaceDir || '', name })
   }
 }
 
