@@ -8,7 +8,7 @@
       @contextmenu.stop="handleContextMenu"
     >
       <span v-if="entry.is_dir" class="expand-arrow">
-        {{ entry.children && entry.children.length > 0 ? '▼' : '▶' }}
+        {{ entry.children != null ? '▼' : '▶' }}
       </span>
       <span class="file-icon">{{ getIcon() }}</span>
       <span class="file-name">{{ entry.name }}</span>

@@ -11,6 +11,8 @@
             <div class="dropdown-item" @click="showWebDavDialog = true">连接 WebDAV...</div>
             <div class="dropdown-item" @click="saveFile">保存 <span class="shortcut-hint">Ctrl+S</span></div>
             <div class="dropdown-item" @click="exportFile">导出 HTML</div>
+            <div class="dropdown-sep"></div>
+            <div class="dropdown-item" @click="handleClose">关闭</div>
           </div>
         </div>
         <div class="menu-item" @click="toggleMenu('view')">
@@ -124,6 +126,7 @@ import Sidebar from './components/Sidebar.vue'
 import WebDavDialog from './components/WebDavDialog.vue'
 import { useWorkspace, type WebDavConfig } from './composables/useWorkspace'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 const asciidoctor = Asciidoctor()
 const ws = useWorkspace()
@@ -174,13 +177,13 @@ function openAsciiDocGuide() {
 }
 
 function createNewFile() {
-  if (!ws.workspaceDir.value) {
-    ws.error.value = '请先打开本地文件夹再创建文件'
+  if (ws.isDemoMode()) {
+    ws.error.value = '请先打开本地文件夹或连接 WebDAV'
     return
   }
   const name = prompt('请输入文件名（以 .adoc 结尾）：', '新文档.adoc')
   if (name) {
-    ws.createFile(ws.workspaceDir.value, name)
+    ws.createFile(ws.workspaceDir.value || '', name)
   }
 }
 
@@ -255,6 +258,73 @@ function exportFile() {
   a.download = ws.getFileName(ws.currentFilePath.value).replace(/\.adoc$/, '.html')
   a.click()
   URL.revokeObjectURL(url)
+}
+
+async function handleClose() {
+  activeMenu.value = null
+
+  // Stop auto-save timer to prevent it firing during the prompt
+  ws.clearAutoSaveTimer()
+
+  if (ws.isDirty.value) {
+    const result = await showCloseConfirmDialog()
+    if (result === 'save') {
+      await ws.saveCurrentFile()
+      getCurrentWindow().close()
+    } else if (result === 'discard') {
+      getCurrentWindow().close()
+    }
+    // 'cancel': resume auto-save and do nothing
+    ws.scheduleAutoSave()
+  } else {
+    getCurrentWindow().close()
+  }
+}
+
+function showCloseConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div')
+    overlay.className = 'modal-overlay'
+    overlay.innerHTML = `
+      <div class="modal-content close-confirm-modal" style="max-width:380px">
+        <div class="modal-header">
+          <h2 class="modal-title">文件未保存</h2>
+        </div>
+        <div class="modal-body" style="color:#d4d4d4;text-align:center;padding:16px 0">
+          <p>当前文件尚未保存，是否保存后再关闭？</p>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding:0 20px 16px">
+          <button class="btn-cancel" id="close-btn-discard">不保存</button>
+          <button class="btn-cancel" id="close-btn-cancel">取消</button>
+          <button class="btn-connect" id="close-btn-save">保存并关闭</button>
+        </div>
+      </div>
+    `
+    document.body.appendChild(overlay)
+
+    const cleanup = () => {
+      overlay.remove()
+    }
+
+    overlay.querySelector('#close-btn-save')?.addEventListener('click', () => {
+      cleanup()
+      resolve('save')
+    })
+    overlay.querySelector('#close-btn-discard')?.addEventListener('click', () => {
+      cleanup()
+      resolve('discard')
+    })
+    overlay.querySelector('#close-btn-cancel')?.addEventListener('click', () => {
+      cleanup()
+      resolve('cancel')
+    })
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        cleanup()
+        resolve('cancel')
+      }
+    })
+  })
 }
 
 function toggleSidebar() {
@@ -358,6 +428,12 @@ onUnmounted(() => {
 
 .dropdown-item:hover {
   background-color: #4d5667;
+}
+
+.dropdown-sep {
+  height: 1px;
+  background-color: #555;
+  margin: 3px 8px;
 }
 
 /* --------------------------

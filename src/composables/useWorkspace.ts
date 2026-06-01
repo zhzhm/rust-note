@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -52,6 +52,43 @@ export function useWorkspace() {
   const error = ref<string | null>(null)
 
   const isDirty = computed(() => currentContent.value !== lastSavedContent.value)
+
+  // Auto-save: 30s timer after content changes
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
+  const AUTO_SAVE_DELAY = 30_000 // 30 seconds
+
+  function clearAutoSaveTimer() {
+    if (autoSaveTimer !== null) {
+      clearTimeout(autoSaveTimer)
+      autoSaveTimer = null
+    }
+  }
+
+  function scheduleAutoSave() {
+    clearAutoSaveTimer()
+    if (!isDirty.value) return
+    autoSaveTimer = setTimeout(() => {
+      saveCurrentFile()
+    }, AUTO_SAVE_DELAY)
+  }
+
+  // When file becomes dirty, start the auto-save timer
+  watch(isDirty, (dirty) => {
+    if (dirty) {
+      scheduleAutoSave()
+    } else {
+      clearAutoSaveTimer()
+    }
+  })
+
+  // When switching files, cancel any pending auto-save
+  watch(currentFilePath, () => {
+    clearAutoSaveTimer()
+  })
+
+  onUnmounted(() => {
+    clearAutoSaveTimer()
+  })
 
   const demoFiles: FileEntry[] = [
     { name: '欢迎文档.adoc', path: '__demo__/欢迎文档.adoc', is_dir: false, children: null },
@@ -403,5 +440,7 @@ function greeting(name) {
     getParentPath,
     isDemoMode,
     refreshFileTree,
+    clearAutoSaveTimer,
+    scheduleAutoSave,
   }
 }

@@ -166,8 +166,7 @@ fn base64_encode(input: &str) -> String {
 /// Parse WebDAV PROPFIND XML response into FileEntry list
 fn parse_propfind_response(
     xml: &str,
-    _base_url: &str,
-    _base_path: &str,
+    request_path: &str,
     backend: &WebDavBackend,
 ) -> Result<Vec<FileEntry>, String> {
     log(&format!("解析 PROPFIND 响应 ({} 字节)", xml.len()));
@@ -244,7 +243,11 @@ fn parse_propfind_response(
                             if let Some(ref href) = current_href {
                                 log(&format!("  条目 href: '{}'", href));
                                 let rel_path = backend.relative_path(href);
-                                if !rel_path.is_empty() {
+                                let normalized_request = request_path.trim_matches('/');
+                                // Skip self-referencing entry (the directory being listed itself)
+                                if rel_path.is_empty() || rel_path == normalized_request {
+                                    log(&format!("    -> 跳过 (目录自身: rel='{}', req='{}')", rel_path, normalized_request));
+                                } else if !rel_path.is_empty() {
                                     let name = rel_path
                                         .rsplit('/')
                                         .next()
@@ -268,7 +271,7 @@ fn parse_propfind_response(
                                         log(&format!("    -> 跳过 (隐藏文件): '{}'", name));
                                     }
                                 } else {
-                                    log("    -> 跳过 (空路径，即目录自身)");
+                                    log("    -> 跳过 (空路径)");
                                 }
                             }
                         } else {
@@ -380,7 +383,7 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("无法读取响应: {}", e))?;
 
         log(&format!("  响应体大小: {} 字节", body.len()));
-        parse_propfind_response(&body, &self.base_url, &self.base_path, self)
+        parse_propfind_response(&body, path, self)
     }
 
     async fn read_file(&self, path: &str) -> Result<String, String> {
