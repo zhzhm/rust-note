@@ -40,22 +40,58 @@
       {{ error }}
     </div>
 
+    <div class="search-box">
+      <button
+        class="refresh-btn"
+        :class="{ spinning: isIndexing }"
+        @click="$emit('refreshIndex')"
+        title="刷新文件索引"
+        :disabled="isIndexing"
+      >↻</button>
+      <input
+        v-model="searchQuery"
+        type="text"
+        class="search-input"
+        placeholder="搜索文件..."
+        @keydown.esc="clearSearch"
+      />
+      <button v-if="isSearching" class="search-clear" @click="clearSearch" title="清除搜索">×</button>
+    </div>
+
     <div class="file-tree">
-      <div v-if="isLoading" class="loading-text">加载中...</div>
-      <div v-else-if="files.length === 0 && !isLoading" class="empty-text">
-        暂无文件。请通过 文件 → 打开文件夹 选择工作目录，或点击 + 新建文件。
-      </div>
+      <!-- Search results mode -->
+      <template v-if="isSearching">
+        <div v-if="searchResults.length === 0" class="empty-text">无匹配文件</div>
+        <div
+          v-for="result in searchResults"
+          :key="result.entry.path"
+          class="search-result-item"
+          :class="{ active: result.entry.path === currentFilePath }"
+          @click="handleSearchResultClick(result.entry.path)"
+        >
+          <span class="result-name" v-html="highlightMatch(result.entry.name, searchQuery.trim())"></span>
+          <span v-if="result.relativePath" class="result-path">{{ result.relativePath }}</span>
+        </div>
+      </template>
+
+      <!-- Normal tree mode -->
       <template v-else>
-        <FileTreeNode
-          v-for="entry in files"
-          :key="entry.path"
-          :entry="entry"
-          :current-path="currentFilePath"
-          :depth="0"
-          @select="(path: string) => $emit('selectFile', path)"
-          @expand="(entry: FileEntry) => $emit('expandDirectory', entry)"
-          @contextmenu="showContextMenu"
-        />
+        <div v-if="isLoading" class="loading-text">加载中...</div>
+        <div v-else-if="files.length === 0 && !isLoading" class="empty-text">
+          暂无文件。请通过 文件 → 打开文件夹 选择工作目录，或点击 + 新建文件。
+        </div>
+        <template v-else>
+          <FileTreeNode
+            v-for="entry in files"
+            :key="entry.path"
+            :entry="entry"
+            :current-path="currentFilePath"
+            :depth="0"
+            @select="(path: string) => $emit('selectFile', path)"
+            @expand="(entry: FileEntry) => $emit('expandDirectory', entry)"
+            @contextmenu="showContextMenu"
+          />
+        </template>
       </template>
     </div>
 
@@ -106,6 +142,8 @@
 
 <script setup lang="ts">
 import { reactive, ref, computed } from 'vue'
+import { pinyin } from 'pinyin-pro'
+import { ElMessageBox } from 'element-plus'
 import type { FileEntry } from '../composables/useWorkspace'
 import FileTreeNode from './FileTreeNode.vue'
 
@@ -117,6 +155,8 @@ const props = defineProps<{
   isWebDAV: boolean
   isLoading: boolean
   error: string | null
+  fileIndex: FileEntry[]
+  isIndexing: boolean
 }>()
 
 const emit = defineEmits<{
@@ -129,12 +169,86 @@ const emit = defineEmits<{
   renameFile: [payload: { path: string; newName: string }]
   openFolder: []
   clearError: []
+  refreshIndex: []
 }>()
 
 const displayName = computed(() => {
   if (props.workspaceLabel) return props.workspaceLabel
   return '项目文件'
 })
+
+// Search state
+const searchQuery = ref('')
+
+interface SearchResult {
+  entry: FileEntry
+  relativePath: string
+}
+
+function fuzzyMatch(name: string, query: string): boolean {
+  const lowerName = name.toLowerCase()
+  const lowerQuery = query.toLowerCase()
+  // Direct substring match
+  if (lowerName.includes(lowerQuery)) return true
+  // Pinyin match: convert Chinese chars to pinyin and try again
+  const pinyinName = pinyin(name, { toneType: 'none', type: 'array' }).join('').toLowerCase()
+  if (pinyinName.includes(lowerQuery)) return true
+  // Also try with spaces between pinyin syllables
+  const pinyinSpaced = pinyin(name, { toneType: 'none', type: 'array' }).join(' ').toLowerCase()
+  if (pinyinSpaced.includes(lowerQuery)) return true
+  return false
+}
+
+function getRelativePath(entryPath: string): string {
+  let rel: string
+  if (props.isWebDAV) {
+    rel = entryPath
+  } else if (props.workspaceDir) {
+    const normalized = entryPath.replace(/\\/g, '/')
+    const prefix = props.workspaceDir.replace(/\\/g, '/').replace(/\/$/, '') + '/'
+    rel = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : entryPath
+  } else {
+    rel = entryPath
+  }
+  // Return parent directory only (filename is already shown separately)
+  const lastSlash = rel.lastIndexOf('/')
+  return lastSlash > 0 ? rel.slice(0, lastSlash) : ''
+}
+
+const searchResults = computed<SearchResult[]>(() => {
+  const q = searchQuery.value.trim()
+  if (!q) return []
+  return props.fileIndex
+    .filter(entry => !entry.is_dir && fuzzyMatch(entry.name, q))
+    .map(entry => ({ entry, relativePath: getRelativePath(entry.path) }))
+})
+
+const isSearching = computed(() => searchQuery.value.trim().length > 0)
+
+function clearSearch() {
+  searchQuery.value = ''
+}
+
+function handleSearchResultClick(path: string) {
+  emit('selectFile', path)
+}
+
+function highlightMatch(text: string, query: string): string {
+  if (!query) return escapeHtml(text)
+  const lowerText = text.toLowerCase()
+  const lowerQuery = query.toLowerCase()
+  const idx = lowerText.indexOf(lowerQuery)
+  if (idx >= 0) {
+    return escapeHtml(text.slice(0, idx)) +
+      '<mark>' + escapeHtml(text.slice(idx, idx + query.length)) + '</mark>' +
+      escapeHtml(text.slice(idx + query.length))
+  }
+  return escapeHtml(text)
+}
+
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
 
 // Context menu state
 const contextMenu = reactive<{
@@ -187,48 +301,80 @@ function toggleAddMenu() {
   showAddMenu.value = !showAddMenu.value
 }
 
-function handleRootNewFile() {
+async function handleRootNewFile() {
   showAddMenu.value = false
-  const name = prompt('请输入文件名：', '新文档.adoc')
-  if (name) {
-    emit('createFile', { parentPath: props.workspaceDir || '', name })
-  }
+  try {
+    const { value } = await ElMessageBox.prompt('请输入文件名：', '新建文件', {
+      inputValue: '新文档.adoc',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (value) {
+      emit('createFile', { parentPath: props.workspaceDir || '', name: value })
+    }
+  } catch { /* cancelled */ }
 }
 
-function handleRootNewDirectory() {
+async function handleRootNewDirectory() {
   showAddMenu.value = false
-  const name = prompt('请输入目录名：', '新目录')
-  if (name) {
-    emit('createDirectory', { parentPath: props.workspaceDir || '', name })
-  }
+  try {
+    const { value } = await ElMessageBox.prompt('请输入目录名：', '新建文件夹', {
+      inputValue: '新目录',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (value) {
+      emit('createDirectory', { parentPath: props.workspaceDir || '', name: value })
+    }
+  } catch { /* cancelled */ }
 }
 
-function handleNewFile() {
+async function handleNewFile() {
   if (!contextMenu.entry) return
   const parentPath = getParentPathForEntry(contextMenu.entry)
-  const name = prompt('请输入文件名：', '新文档.adoc')
-  if (name) {
-    emit('createFile', { parentPath, name })
-  }
   closeContextMenu()
+  try {
+    const { value } = await ElMessageBox.prompt('请输入文件名：', '新建文件', {
+      inputValue: '新文档.adoc',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (value) {
+      emit('createFile', { parentPath, name: value })
+    }
+  } catch { /* cancelled */ }
 }
 
-function handleNewDirectory() {
+async function handleNewDirectory() {
   if (!contextMenu.entry || !contextMenu.entry.is_dir) return
-  const name = prompt('请输入目录名：', '新目录')
-  if (name) {
-    emit('createDirectory', { parentPath: contextMenu.entry.path, name })
-  }
   closeContextMenu()
+  try {
+    const { value } = await ElMessageBox.prompt('请输入目录名：', '新建文件夹', {
+      inputValue: '新目录',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (value) {
+      emit('createDirectory', { parentPath: contextMenu.entry.path, name: value })
+    }
+  } catch { /* cancelled */ }
 }
 
-function handleRename() {
+async function handleRename() {
   if (!contextMenu.entry) return
-  const newName = prompt('请输入新名称：', contextMenu.entry.name)
-  if (newName && newName !== contextMenu.entry.name) {
-    emit('renameFile', { path: contextMenu.entry.path, newName })
-  }
+  const entryName = contextMenu.entry.name
+  const entryPath = contextMenu.entry.path
   closeContextMenu()
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新名称：', '重命名', {
+      inputValue: entryName,
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (value && value !== entryName) {
+      emit('renameFile', { path: entryPath, newName: value })
+    }
+  } catch { /* cancelled */ }
 }
 
 function handleCopy() {
@@ -237,13 +383,20 @@ function handleCopy() {
   closeContextMenu()
 }
 
-function handleDelete() {
+async function handleDelete() {
   if (!contextMenu.entry) return
   const typeLabel = contextMenu.entry.is_dir ? '目录' : '文件'
-  if (confirm(`确定要删除${typeLabel} "${contextMenu.entry.name}" 吗？此操作不可恢复。`)) {
-    emit('deleteFile', contextMenu.entry.path)
-  }
+  const entryName = contextMenu.entry.name
+  const entryPath = contextMenu.entry.path
   closeContextMenu()
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除${typeLabel} "${entryName}" 吗？此操作不可恢复。`,
+      '确认删除',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    )
+    emit('deleteFile', entryPath)
+  } catch { /* cancelled */ }
 }
 </script>
 
@@ -343,6 +496,131 @@ function handleDelete() {
   font-size: 12px;
   cursor: pointer;
   word-break: break-word;
+}
+
+.search-box {
+  position: relative;
+  padding: 0 8px 8px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.refresh-btn {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+  transition: color 0.2s, background-color 0.2s;
+  line-height: 1;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  color: #d4d4d4;
+  background-color: #2a2d35;
+}
+
+.refresh-btn:disabled {
+  cursor: default;
+}
+
+.refresh-btn.spinning {
+  animation: spin 1s linear infinite;
+  color: #5a8dee;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  background-color: #2a2d35;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #d4d4d4;
+  padding: 6px 28px 6px 10px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.search-input::placeholder {
+  color: #666;
+}
+
+.search-input:focus {
+  border-color: #5a8dee;
+}
+
+.search-clear {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.search-clear:hover {
+  color: #d4d4d4;
+}
+
+.search-result-item {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background-color 0.1s;
+  font-size: 13px;
+  user-select: none;
+}
+
+.search-result-item:hover {
+  background-color: #2a2e35;
+}
+
+.search-result-item.active {
+  background-color: #3a3f4b;
+}
+
+.result-name {
+  color: #d4d4d4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-name :deep(mark) {
+  background-color: #5a8dee44;
+  color: #7ab4ff;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.result-path {
+  font-size: 11px;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
 }
 
 .file-tree {

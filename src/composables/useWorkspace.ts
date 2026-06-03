@@ -50,6 +50,8 @@ export function useWorkspace() {
   const lastSavedContent = ref('')
   const isLoading = ref(false)
   const error = ref<string | null>(null)
+  const fileIndex = ref<FileEntry[]>([])
+  const isIndexing = ref(false)
 
   const isDirty = computed(() => currentContent.value !== lastSavedContent.value)
 
@@ -252,21 +254,97 @@ function greeting(name) {
     } finally {
       isLoading.value = false
     }
+
+    // Build file index in the background (non-blocking)
+    // so the file tree renders immediately
+    if (hasWorkspace()) {
+      buildFileIndex().catch(() => {})
+    }
+  }
+
+  async function buildFileIndex() {
+    if (!hasWorkspace()) {
+      fileIndex.value = [...files.value]
+      return
+    }
+
+    isIndexing.value = true
+    try {
+      const path = isWebDAV.value ? '' : (workspaceDir.value || '')
+      const entries = await invoke<FileEntry[]>('list_all_files_recursive', { path })
+      fileIndex.value = entries
+      // Refresh any already-expanded directories from the new cache
+      refreshExpandedDirectories(files.value)
+    } catch (e) {
+      error.value = `构建文件索引失败: ${e}`
+      fileIndex.value = []
+    } finally {
+      isIndexing.value = false
+    }
+  }
+
+  /**
+   * Find direct children of a directory from the cached fileIndex.
+   * Works for both local (absolute paths) and WebDAV (relative paths).
+   */
+  function findDirectChildren(dirPath: string): FileEntry[] {
+    const normalize = (p: string) => p.replace(/\\/g, '/').replace(/\/$/, '')
+    const normalizedDir = normalize(dirPath)
+    const prefix = normalizedDir + '/'
+
+    const children: FileEntry[] = []
+    for (const entry of fileIndex.value) {
+      const entryPath = normalize(entry.path)
+      if (entryPath.startsWith(prefix)) {
+        const rest = entryPath.slice(prefix.length)
+        // Only direct children: no more slashes in the remaining path
+        if (rest && !rest.includes('/')) {
+          children.push({ ...entry, children: entry.is_dir ? (entry.children ?? []) : null })
+        }
+      }
+    }
+
+    // Sort: directories first, then alphabetical
+    children.sort((a, b) =>
+      Number(b.is_dir) - Number(a.is_dir) ||
+      a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+    )
+
+    return children
   }
 
   async function expandDirectory(entry: FileEntry) {
     if (!entry.is_dir) return
 
-    if (entry.children && entry.children.length > 0) {
-      entry.children = []
+    if (entry.children != null) {
+      entry.children = null
       return
     }
 
+    // Try cache first — no network request needed
+    if (fileIndex.value.length > 0) {
+      entry.children = findDirectChildren(entry.path)
+      return
+    }
+
+    // Fallback: fetch from network if cache is empty
     try {
       const children = await invoke<FileEntry[]>('list_directory', { path: entry.path })
       entry.children = children
     } catch (e) {
       error.value = `展开目录失败: ${e}`
+    }
+  }
+
+  /**
+   * Refresh all currently expanded directories in the file tree
+   * using the latest fileIndex cache.
+   */
+  function refreshExpandedDirectories(entries: FileEntry[]) {
+    for (const entry of entries) {
+      if (entry.is_dir && entry.children != null && fileIndex.value.length > 0) {
+        entry.children = findDirectChildren(entry.path)
+      }
     }
   }
 
@@ -423,11 +501,14 @@ function greeting(name) {
     isDirty,
     isLoading,
     error,
+    fileIndex,
+    isIndexing,
     // Methods
     init,
     pickAndSetDirectory,
     connectWebDAV,
     loadWorkspace,
+    buildFileIndex,
     expandDirectory,
     openFile,
     saveCurrentFile,

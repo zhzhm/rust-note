@@ -197,6 +197,16 @@ pub async fn list_directory(
 }
 
 #[tauri::command]
+pub async fn list_all_files_recursive(
+    path: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Vec<FileEntry>, String> {
+    let backend = state.backend.read().await;
+    let result = backend.list_all_files_recursive(&path).await;
+    result
+}
+
+#[tauri::command]
 pub async fn read_file(
     path: String,
     state: tauri::State<'_, Arc<AppState>>,

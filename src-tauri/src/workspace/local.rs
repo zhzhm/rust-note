@@ -65,6 +65,79 @@ impl LocalBackend {
         Ok(entries)
     }
 
+    fn list_all_recursive_sync(path: &str) -> Result<Vec<FileEntry>, String> {
+        let dir = Path::new(path);
+
+        if !dir.exists() {
+            return Err(format!("目录不存在: {}", path));
+        }
+        if !dir.is_dir() {
+            return Err(format!("路径不是目录: {}", path));
+        }
+
+        let mut results: Vec<FileEntry> = Vec::new();
+        Self::walk_dir_recursive(dir, &mut results)?;
+        Ok(results)
+    }
+
+    fn walk_dir_recursive(dir: &Path, results: &mut Vec<FileEntry>) -> Result<(), String> {
+        let read_dir = fs::read_dir(dir)
+            .map_err(|e| format!("无法读取目录 '{}': {}", dir.display(), e))?;
+
+        let mut entries: Vec<FileEntry> = Vec::new();
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let entry_path = entry.path();
+            let name = entry_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            if name.starts_with('.') {
+                continue;
+            }
+
+            let is_dir = entry_path.is_dir();
+            let is_symlink = entry
+                .path()
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+
+            if is_symlink {
+                continue;
+            }
+
+            entries.push(FileEntry {
+                name,
+                path: entry_path.to_string_lossy().to_string(),
+                is_dir,
+                children: if is_dir { Some(vec![]) } else { None },
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        for entry in &entries {
+            results.push(entry.clone());
+            if entry.is_dir {
+                let sub_dir = Path::new(&entry.path);
+                // Best-effort: skip directories we can't read
+                let _ = Self::walk_dir_recursive(sub_dir, results);
+            }
+        }
+
+        Ok(())
+    }
+
     fn read_file_sync(path: &str) -> Result<String, String> {
         let file_path = Path::new(path);
 
@@ -248,6 +321,13 @@ impl FileBackend for LocalBackend {
     async fn list_directory(&self, path: &str) -> Result<Vec<FileEntry>, String> {
         let p = path.to_string();
         tokio::task::spawn_blocking(move || Self::list_dir_sync(&p))
+            .await
+            .map_err(|e| format!("操作被中断: {}", e))?
+    }
+
+    async fn list_all_files_recursive(&self, path: &str) -> Result<Vec<FileEntry>, String> {
+        let p = path.to_string();
+        tokio::task::spawn_blocking(move || Self::list_all_recursive_sync(&p))
             .await
             .map_err(|e| format!("操作被中断: {}", e))?
     }

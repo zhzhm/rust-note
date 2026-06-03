@@ -21,6 +21,7 @@ pub fn run() {
             workspace::save_settings,
             workspace::connect_webdav,
             workspace::list_directory,
+            workspace::list_all_files_recursive,
             workspace::read_file,
             workspace::write_file,
             workspace::create_file,

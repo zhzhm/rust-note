@@ -6,13 +6,13 @@
         <div class="menu-item" @click="toggleMenu('file')">
           <span class="menu-label">文件</span>
           <div v-if="activeMenu === 'file'" class="dropdown">
-            <div class="dropdown-item" @click="createNewFile">新建文件</div>
-            <div class="dropdown-item" @click="openFolder">打开本地文件夹</div>
-            <div class="dropdown-item" @click="showWebDavDialog = true">连接 WebDAV...</div>
-            <div class="dropdown-item" @click="saveFile">保存 <span class="shortcut-hint">Ctrl+S</span></div>
-            <div class="dropdown-item" @click="exportFile">导出 HTML</div>
+            <div class="dropdown-item" @click.stop="createNewFile">新建文件</div>
+            <div class="dropdown-item" @click.stop="openFolder">打开本地文件夹</div>
+            <div class="dropdown-item" @click.stop="showWebDavDialog = true; activeMenu = null">连接 WebDAV...</div>
+            <div class="dropdown-item" @click.stop="saveFile">保存 <span class="shortcut-hint">Ctrl+S</span></div>
+            <div class="dropdown-item" @click.stop="exportFile">导出 HTML</div>
             <div class="dropdown-sep"></div>
-            <div class="dropdown-item" @click="handleClose">关闭</div>
+            <div class="dropdown-item" @click.stop="handleClose">关闭</div>
           </div>
         </div>
         <div class="menu-item" @click="toggleMenu('view')">
@@ -43,6 +43,8 @@
         :is-web-d-a-v="ws.isWebDAV.value"
         :is-loading="ws.isLoading.value"
         :error="ws.error.value"
+        :file-index="ws.fileIndex.value"
+        :is-indexing="ws.isIndexing.value"
         @select-file="ws.openFile"
         @expand-directory="ws.expandDirectory"
         @create-file="handleSidebarCreateFile"
@@ -52,6 +54,7 @@
         @rename-file="handleRenameFile"
         @open-folder="openFolder"
         @clear-error="ws.error.value = null"
+        @refresh-index="ws.buildFileIndex()"
       />
 
       <!-- 主编辑区域 -->
@@ -65,10 +68,14 @@
             </span>
           </div>
           <textarea
+            ref="editorRef"
             v-model="currentContent"
             class="editor-textarea"
             placeholder="输入 Asciidoc 语法..."
             spellcheck="false"
+            @scroll="syncPreviewScroll"
+            @click="syncCursorToPreview"
+            @keydown="onEditorKeydown"
           ></textarea>
         </div>
 
@@ -82,7 +89,7 @@
           <div class="panel-header">
             <span class="panel-title">实时预览</span>
           </div>
-          <div class="preview-content" v-html="renderedHtml"></div>
+          <div ref="previewRef" class="preview-content" v-html="renderedHtml" @scroll="syncEditorScroll"></div>
         </div>
       </main>
     </div>
@@ -122,6 +129,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import Asciidoctor from 'asciidoctor'
 import hljs from 'highlight.js'
+import { ElMessageBox } from 'element-plus'
 import Sidebar from './components/Sidebar.vue'
 import WebDavDialog from './components/WebDavDialog.vue'
 import { useWorkspace, type WebDavConfig } from './composables/useWorkspace'
@@ -140,6 +148,114 @@ const showWebDavDialog = ref(false)
 const webDavConnecting = ref(false)
 const webDavError = ref<string | null>(null)
 const isDragging = ref(false)
+
+// --- scroll sync ---
+const editorRef = ref<HTMLTextAreaElement | null>(null)
+const previewRef = ref<HTMLDivElement | null>(null)
+const isScrollSyncing = ref(false)
+let cursorSyncTimer: ReturnType<typeof setTimeout> | null = null
+let lastSyncedLine = -1
+
+function getScrollPercent(el: HTMLElement): number {
+  const maxScroll = el.scrollHeight - el.clientHeight
+  if (maxScroll <= 0) return 0
+  return el.scrollTop / maxScroll
+}
+
+function scrollToPercent(el: HTMLElement, percent: number) {
+  const maxScroll = el.scrollHeight - el.clientHeight
+  if (maxScroll <= 0) return
+  // Avoid tiny adjustments that cause rounding-drift feedback loops
+  const target = Math.round(percent * maxScroll)
+  if (Math.abs(el.scrollTop - target) < 2) return
+  el.scrollTop = target
+}
+
+/** 编辑器滚动 → 预览跟随 */
+function syncPreviewScroll() {
+  if (isScrollSyncing.value) return
+  isScrollSyncing.value = true
+  const editor = editorRef.value
+  const preview = previewRef.value
+  if (editor && preview) {
+    scrollToPercent(preview, getScrollPercent(editor))
+  }
+  requestAnimationFrame(() => {
+    isScrollSyncing.value = false
+  })
+}
+
+/** 预览滚动 → 编辑器跟随 */
+function syncEditorScroll() {
+  if (isScrollSyncing.value) return
+  isScrollSyncing.value = true
+  const editor = editorRef.value
+  const preview = previewRef.value
+  if (editor && preview) {
+    scrollToPercent(editor, getScrollPercent(preview))
+  }
+  requestAnimationFrame(() => {
+    isScrollSyncing.value = false
+  })
+}
+
+/** 仅导航键（方向键/翻页等）触发光标行同步 */
+function onEditorKeydown(e: KeyboardEvent) {
+  const navKeys = [
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'PageUp', 'PageDown', 'Home', 'End',
+  ]
+  if (navKeys.includes(e.key)) {
+    syncCursorToPreview()
+  }
+}
+
+/** 光标行变化时 → 预览跟随滚动 */
+function syncCursorToPreview() {
+  if (cursorSyncTimer) clearTimeout(cursorSyncTimer)
+  cursorSyncTimer = setTimeout(() => {
+    const editor = editorRef.value
+    const preview = previewRef.value
+    if (!editor || !preview) return
+
+    const text = editor.value
+    const cursorPos = editor.selectionStart
+    const textBefore = text.substring(0, cursorPos)
+    const currentLine = textBefore.split('\n').length - 1 // 0-indexed
+
+    if (currentLine === lastSyncedLine) return
+
+    const totalLines = text.split('\n').length
+    const maxScroll = preview.scrollHeight - preview.clientHeight
+    if (maxScroll <= 0) return
+
+    const linePercent = totalLines > 1 ? currentLine / (totalLines - 1) : 0
+    const targetScrollTop = linePercent * maxScroll
+    const lineDelta = Math.abs(currentLine - lastSyncedLine)
+    lastSyncedLine = currentLine
+
+    // Prevent the resulting preview scroll event from pulling the editor
+    isScrollSyncing.value = true
+
+    if (lineDelta === 1) {
+      // One-line movement: follow proportionally so preview scrolls incrementally
+      scrollToPercent(preview, linePercent)
+    } else {
+      // Large jump (click, page-up/down): minimal scroll to bring target into view
+      const viewportTop = preview.scrollTop
+      const viewportBottom = preview.scrollTop + preview.clientHeight
+      if (targetScrollTop < viewportTop) {
+        preview.scrollTop = targetScrollTop
+      } else if (targetScrollTop > viewportBottom) {
+        preview.scrollTop = targetScrollTop - preview.clientHeight + 40
+      }
+    }
+
+    requestAnimationFrame(() => {
+      isScrollSyncing.value = false
+    })
+  }, 100)
+}
 
 // v-model on textarea needs a writable ref; we bind to ws.currentContent
 const currentContent = computed({
@@ -176,14 +292,23 @@ function openAsciiDocGuide() {
   activeMenu.value = null
 }
 
-function createNewFile() {
+async function createNewFile() {
+  activeMenu.value = null
   if (ws.isDemoMode()) {
     ws.error.value = '请先打开本地文件夹或连接 WebDAV'
     return
   }
-  const name = prompt('请输入文件名（以 .adoc 结尾）：', '新文档.adoc')
-  if (name) {
-    ws.createFile(ws.workspaceDir.value || '', name)
+  try {
+    const { value } = await ElMessageBox.prompt('请输入文件名（以 .adoc 结尾）：', '新建文件', {
+      inputValue: '新文档.adoc',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (value) {
+      ws.createFile(ws.workspaceDir.value || '', value)
+    }
+  } catch {
+    // user cancelled
   }
 }
 
@@ -196,6 +321,7 @@ function handleSidebarCreateDirectory(payload: { parentPath: string; name: strin
 }
 
 function saveFile() {
+  activeMenu.value = null
   ws.saveCurrentFile()
 }
 
@@ -208,6 +334,7 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 function openFolder() {
+  activeMenu.value = null
   ws.pickAndSetDirectory()
 }
 
@@ -249,6 +376,7 @@ function handleRenameFile(payload: { path: string; newName: string }) {
 }
 
 function exportFile() {
+  activeMenu.value = null
   if (!ws.currentContent.value) return
   const html = renderedHtml.value
   const blob = new Blob([html], { type: 'text/html' })
@@ -364,6 +492,7 @@ onUnmounted(() => {
   document.removeEventListener('mousemove', handleMouseMove)
   document.removeEventListener('mouseup', handleMouseUp)
   document.removeEventListener('keydown', handleKeyDown)
+  if (cursorSyncTimer) clearTimeout(cursorSyncTimer)
 })
 </script>
 

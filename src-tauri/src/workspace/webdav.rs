@@ -13,20 +13,10 @@ pub struct WebDavBackend {
     base_path: String,
 }
 
-fn log(msg: &str) {
-    println!("[WebDAV] {}", msg);
-}
-
 impl WebDavBackend {
     pub fn new(url: &str, username: &str, password: &str, base_path: &str) -> Result<Self, String> {
         let url = url.trim_end_matches('/');
         let base_path = base_path.trim_matches('/');
-
-        log(&format!("初始化 WebDAV 后端:"));
-        log(&format!("  URL       : {}", url));
-        log(&format!("  用户名    : {}", username));
-        log(&format!("  基础路径  : {}", if base_path.is_empty() { "(根目录)" } else { base_path }));
-        log(&format!("  密码长度  : {} 字符", password.len()));
 
         let mut headers = HeaderMap::new();
         let auth = format!(
@@ -43,8 +33,6 @@ impl WebDavBackend {
             .default_headers(headers)
             .build()
             .map_err(|e| format!("无法创建 HTTP 客户端: {}", e))?;
-
-        log("HTTP 客户端创建成功");
 
         Ok(WebDavBackend {
             client,
@@ -68,13 +56,11 @@ impl WebDavBackend {
 
     /// Extract the path portion from an href (handles both full URLs and path-only strings)
     fn extract_path_from_href(href: &str) -> String {
-        // If it looks like a full URL, parse it and extract the path
         if href.starts_with("http://") || href.starts_with("https://") {
             if let Ok(parsed) = reqwest::Url::parse(href) {
                 return parsed.path().to_string();
             }
         }
-        // Otherwise, assume it's already a path; strip query/fragment if present
         if let Some(pos) = href.find('?') {
             href[..pos].to_string()
         } else {
@@ -83,25 +69,16 @@ impl WebDavBackend {
     }
 
     /// Extract relative path from a server-returned href
-    ///
-    /// Server hrefs can be:
-    /// - Full URL: "https://server/dav/files/user/notes/doc.adoc"
-    /// - Absolute path: "/dav/files/user/notes/doc.adoc"
-    ///
-    /// We need the path relative to our connection point (base_url + base_path).
     fn relative_path(&self, href: &str) -> String {
         let decoded = urlencoding::decode(href)
             .map(|s| s.to_string())
             .unwrap_or_else(|_| href.to_string());
 
-        // Extract just the path portion
         let path_only = Self::extract_path_from_href(&decoded);
 
-        // Build the connection-point path from base_url
         let base_url_path = if let Ok(parsed) = reqwest::Url::parse(&self.base_url) {
             parsed.path().trim_end_matches('/').to_string()
         } else {
-            // Fallback: try to extract path from base_url string
             self.base_url
                 .split("://")
                 .nth(1)
@@ -113,48 +90,40 @@ impl WebDavBackend {
                 .unwrap_or_default()
         };
 
-        // Full connection path = base_url's path + optional base_path
         let connection_path = if self.base_path.is_empty() {
             base_url_path.clone()
         } else {
             format!("{}{}", base_url_path, self.base_path)
         };
 
-        log(&format!("    href       : {}", href));
-        log(&format!("    decoded    : {}", decoded));
-        log(&format!("    path_only  : {}", path_only));
-        log(&format!("    base_url_path: {}", base_url_path));
-        log(&format!("    connection_path: {}", connection_path));
-
-        // Strip the connection_path prefix from path_only
         let rel = if let Some(stripped) = path_only.strip_prefix(&connection_path) {
-            log(&format!("    -> 匹配 connection_path, stripped: {}", stripped));
             stripped.to_string()
         } else if let Some(stripped) = path_only.strip_prefix(&base_url_path) {
-            log(&format!("    -> 匹配 base_url_path, stripped: {}", stripped));
             stripped.to_string()
         } else if !self.base_path.is_empty() {
-            // Some servers return hrefs where base_path is already part of the URL
-            // Try stripping just the base_path portion
             let bp = &self.base_path;
             if let Some(stripped) = path_only.strip_prefix(bp) {
-                log(&format!("    -> 匹配 base_path, stripped: {}", stripped));
                 stripped.to_string()
             } else {
-                // Last resort: use the last path segment as the relative path
                 let trimmed = path_only.trim_matches('/');
-                let last_segment = trimmed.rsplit('/').next().unwrap_or(trimmed);
-                log(&format!("    -> 回退: 使用最后一段 '{}'", last_segment));
-                last_segment.to_string()
+                trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
             }
         } else {
-            log("    -> 无匹配，使用原始 path_only");
             path_only.trim_matches('/').to_string()
         };
 
-        let trimmed = rel.trim_matches('/').to_string();
-        log(&format!("    最终相对路径: '{}'", trimmed));
-        trimmed
+        rel.trim_matches('/').to_string()
+    }
+
+    async fn walk_webdav_recursive(&self, path: &str, results: &mut Vec<FileEntry>) -> Result<(), String> {
+        let entries = self.list_directory(path).await?;
+        for entry in &entries {
+            results.push(entry.clone());
+            if entry.is_dir {
+                let _ = Box::pin(Self::walk_webdav_recursive(self, &entry.path, results)).await;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -169,9 +138,6 @@ fn parse_propfind_response(
     request_path: &str,
     backend: &WebDavBackend,
 ) -> Result<Vec<FileEntry>, String> {
-    log(&format!("解析 PROPFIND 响应 ({} 字节)", xml.len()));
-    log(&format!("  原始 XML 前 2000 字符:\n{}", &xml[..xml.len().min(2000)]));
-
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -241,12 +207,10 @@ fn parse_propfind_response(
                     "response" => {
                         if !skip_response {
                             if let Some(ref href) = current_href {
-                                log(&format!("  条目 href: '{}'", href));
                                 let rel_path = backend.relative_path(href);
                                 let normalized_request = request_path.trim_matches('/');
-                                // Skip self-referencing entry (the directory being listed itself)
                                 if rel_path.is_empty() || rel_path == normalized_request {
-                                    log(&format!("    -> 跳过 (目录自身: rel='{}', req='{}')", rel_path, normalized_request));
+                                    // skip self-referencing entry
                                 } else if !rel_path.is_empty() {
                                     let name = rel_path
                                         .rsplit('/')
@@ -255,8 +219,6 @@ fn parse_propfind_response(
                                         .to_string();
 
                                     if !name.starts_with('.') {
-                                        log(&format!("    -> 添加: name='{}', path='{}', is_dir={}",
-                                            name, rel_path, is_collection));
                                         entries.push(FileEntry {
                                             name,
                                             path: rel_path,
@@ -267,15 +229,9 @@ fn parse_propfind_response(
                                                 None
                                             },
                                         });
-                                    } else {
-                                        log(&format!("    -> 跳过 (隐藏文件): '{}'", name));
                                     }
-                                } else {
-                                    log("    -> 跳过 (空路径)");
                                 }
                             }
-                        } else {
-                            log("    -> 跳过 (非 200 propstat)");
                         }
                         in_response = false;
                         current_href = None;
@@ -311,15 +267,6 @@ fn parse_propfind_response(
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
-    log(&format!("解析完成: {} 个条目", entries.len()));
-    for e in &entries {
-        log(&format!("  {} {} [{}]",
-            if e.is_dir { "📁" } else { "📄" },
-            e.name,
-            e.path
-        ));
-    }
-
     Ok(entries)
 }
 
@@ -331,64 +278,45 @@ impl FileBackend for WebDavBackend {
             url.push('/');
         }
 
-        log(&format!("=============================="));
-        log(&format!("list_directory 调用:"));
-        log(&format!("  输入 path : '{}'", path));
-        log(&format!("  请求 URL  : {}", url));
-        log(&format!("  认证方式  : Basic Auth"));
-        log(&format!("=============================="));
-
         let response = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
             .header("Depth", "1")
             .send()
             .await
-            .map_err(|e| {
-                log(&format!("  ❌ 网络请求失败: {}", e));
-                format!("WebDAV 请求失败: {}", e)
-            })?;
+            .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP 状态码: {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")));
 
         if status == 401 {
-            log("  ❌ 认证失败 (401)");
             return Err("认证失败，请检查用户名和密码".to_string());
         }
         if status == 404 {
-            log(&format!("  ❌ 路径不存在 (404): {}", path));
             return Err(format!("路径不存在: {}", path));
         }
         if status == 403 {
-            log("  ❌ 无权限 (403)");
             return Err("无权限访问该路径".to_string());
         }
         if !status.is_success() {
-            log(&format!("  ❌ HTTP 错误: {}", status.as_u16()));
-            // Try to read response body for more info
-            if let Ok(body) = response.text().await {
-                log(&format!("  响应体: {}", &body[..body.len().min(500)]));
-            }
-            return Err(format!(
-                "WebDAV 请求失败: HTTP {}",
-                status.as_u16()
-            ));
+            return Err(format!("WebDAV 请求失败: HTTP {}", status.as_u16()));
         }
 
-        log("  ✓ 请求成功，读取响应体...");
         let body = response
             .text()
             .await
             .map_err(|e| format!("无法读取响应: {}", e))?;
 
-        log(&format!("  响应体大小: {} 字节", body.len()));
         parse_propfind_response(&body, path, self)
+    }
+
+    async fn list_all_files_recursive(&self, path: &str) -> Result<Vec<FileEntry>, String> {
+        let mut results = Vec::new();
+        Self::walk_webdav_recursive(self, path, &mut results).await?;
+        Ok(results)
     }
 
     async fn read_file(&self, path: &str) -> Result<String, String> {
         let url = self.full_url(path);
-        log(&format!("read_file: '{}' -> URL: {}", path, url));
 
         let response = self
             .client
@@ -398,7 +326,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());
@@ -418,7 +345,6 @@ impl FileBackend for WebDavBackend {
 
     async fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
         let url = self.full_url(path);
-        log(&format!("write_file: '{}' -> URL: {} ({} 字节)", path, url, content.len()));
 
         let response = self
             .client
@@ -429,7 +355,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {}", status.as_u16()));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());
@@ -450,7 +375,6 @@ impl FileBackend for WebDavBackend {
         };
         let file_path = format!("{}{}", parent, name);
         let url = self.full_url(&file_path);
-        log(&format!("create_file: '{}' -> URL: {}", file_path, url));
 
         let response = self
             .client
@@ -461,7 +385,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {}", status.as_u16()));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());
@@ -491,7 +414,6 @@ impl FileBackend for WebDavBackend {
         if !url.ends_with('/') {
             url.push('/');
         }
-        log(&format!("create_directory: '{}/' -> URL: {}", dir_path, url));
 
         let response = self
             .client
@@ -501,7 +423,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {}", status.as_u16()));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());
@@ -523,7 +444,6 @@ impl FileBackend for WebDavBackend {
 
     async fn delete_file(&self, path: &str) -> Result<(), String> {
         let url = self.full_url(path);
-        log(&format!("delete_file: '{}' -> URL: {}", path, url));
 
         let response = self
             .client
@@ -533,7 +453,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {}", status.as_u16()));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());
@@ -550,7 +469,6 @@ impl FileBackend for WebDavBackend {
     async fn copy_entry(&self, src: &str, dst: &str) -> Result<FileEntry, String> {
         let src_url = self.full_url(src);
         let dst_url = self.full_url(dst);
-        log(&format!("copy_entry: '{}' -> '{}'", src_url, dst_url));
 
         let response = self
             .client
@@ -561,7 +479,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {}", status.as_u16()));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());
@@ -592,7 +509,6 @@ impl FileBackend for WebDavBackend {
             format!("{}/{}", parent, new_name)
         };
         let dst_url = self.full_url(&dst_path);
-        log(&format!("rename_entry: '{}' -> '{}'", src_url, dst_url));
 
         let response = self
             .client
@@ -603,7 +519,6 @@ impl FileBackend for WebDavBackend {
             .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
 
         let status = response.status();
-        log(&format!("  HTTP {}", status.as_u16()));
 
         if status == 401 {
             return Err("认证失败，请检查用户名和密码".to_string());

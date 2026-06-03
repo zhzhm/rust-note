@@ -13,6 +13,7 @@ pub struct FileEntry {
 #[async_trait]
 pub trait FileBackend: Send + Sync {
     async fn list_directory(&self, path: &str) -> Result<Vec<FileEntry>, String>;
+    async fn list_all_files_recursive(&self, path: &str) -> Result<Vec<FileEntry>, String>;
     async fn read_file(&self, path: &str) -> Result<String, String>;
     async fn write_file(&self, path: &str, content: &str) -> Result<(), String>;
     async fn create_file(&self, parent_path: &str, name: &str) -> Result<FileEntry, String>;

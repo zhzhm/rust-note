@@ -10,7 +10,6 @@
       <span v-if="entry.is_dir" class="expand-arrow">
         {{ entry.children != null ? '▼' : '▶' }}
       </span>
-      <span class="file-icon">{{ getIcon() }}</span>
       <span class="file-name">{{ entry.name }}</span>
     </div>
     <template v-if="entry.is_dir && entry.children && entry.children.length > 0">
@@ -42,24 +41,6 @@ const emit = defineEmits<{
   expand: [entry: FileEntry]
   contextmenu: [payload: { entry: FileEntry; event: MouseEvent }]
 }>()
-
-function getIcon(): string {
-  if (!props.entry.is_dir) {
-    const name = props.entry.name.toLowerCase()
-    if (name.endsWith('.adoc') || name.endsWith('.asciidoc')) return '📝'
-    if (name.endsWith('.md')) return '📘'
-    if (name.endsWith('.txt')) return '📄'
-    if (name.endsWith('.js') || name.endsWith('.ts')) return '💛'
-    if (name.endsWith('.json')) return '📋'
-    if (name.endsWith('.html')) return '🌐'
-    if (name.endsWith('.css')) return '🎨'
-    if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.gif') || name.endsWith('.svg'))
-      return '🖼️'
-    return '📄'
-  }
-  if (props.entry.children && props.entry.children.length > 0) return '📂'
-  return '📁'
-}
 
 function handleClick() {
   if (props.entry.is_dir) {
@@ -103,12 +84,6 @@ function handleContextMenu(e: MouseEvent) {
   font-size: 10px;
   color: #888;
   flex-shrink: 0;
-}
-
-.file-icon {
-  margin-right: 8px;
-  flex-shrink: 0;
-  font-size: 14px;
 }
 
 .file-name {
