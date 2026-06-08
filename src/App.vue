@@ -45,7 +45,7 @@
         :error="ws.error.value"
         :file-index="ws.fileIndex.value"
         :is-indexing="ws.isIndexing.value"
-        @select-file="ws.openFile"
+        @select-file="handleFileSelect"
         @expand-directory="ws.expandDirectory"
         @create-file="handleSidebarCreateFile"
         @create-directory="handleSidebarCreateDirectory"
@@ -199,7 +199,7 @@ function syncEditorScroll() {
   })
 }
 
-/** 仅导航键（方向键/翻页等）触发光标行同步 */
+/** 仅导航键（方向键/翻页等）触发光标行同步；Ctrl+X 无选区时删除当前行 */
 function onEditorKeydown(e: KeyboardEvent) {
   const navKeys = [
     'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
@@ -207,6 +207,19 @@ function onEditorKeydown(e: KeyboardEvent) {
   ]
   if (navKeys.includes(e.key)) {
     syncCursorToPreview()
+    return
+  }
+
+  // Ctrl+X / Cmd+X — 无选区时删除整行，有选区时走浏览器原生剪切
+  const mod = e.metaKey || e.ctrlKey
+  if (mod && e.key === 'x') {
+    const editor = editorRef.value
+    if (!editor) return
+    // 有选区时不拦截（走原生剪切）
+    if (editor.selectionStart !== editor.selectionEnd) return
+
+    e.preventDefault()
+    deleteCurrentLine()
   }
 }
 
@@ -255,6 +268,61 @@ function syncCursorToPreview() {
       isScrollSyncing.value = false
     })
   }, 100)
+}
+
+/** 删除光标所在行（Ctrl+X 无选区时触发） */
+function deleteCurrentLine() {
+  const editor = editorRef.value
+  if (!editor) return
+
+  const content = editor.value
+  const cursorPos = editor.selectionStart
+
+  // 找到当前行的起始位置
+  const textBefore = content.substring(0, cursorPos)
+  const lineStart = textBefore.lastIndexOf('\n') + 1
+
+  // 找到当前行结束位置（包含尾部换行符）
+  const textAfter = content.substring(lineStart)
+  const nextNewline = textAfter.indexOf('\n')
+
+  let deleteFrom: number
+  let deleteTo: number
+  let newCursorPos: number
+
+  if (nextNewline === -1) {
+    // 最后一行，无尾部换行符
+    if (lineStart === 0) {
+      // 只有一行 → 清空
+      deleteFrom = 0
+      deleteTo = content.length
+      newCursorPos = 0
+    } else {
+      // 多行中的最后一行 → 连带前面的换行符一起删除，避免留下空行
+      deleteFrom = lineStart - 1
+      deleteTo = content.length
+      newCursorPos = lineStart - 1
+    }
+  } else {
+    // 普通行 → 删除该行及尾部换行符
+    deleteFrom = lineStart
+    deleteTo = lineStart + nextNewline + 1
+    newCursorPos = lineStart
+  }
+
+  // 更新内容
+  ws.currentContent.value =
+    content.substring(0, deleteFrom) + content.substring(deleteTo)
+
+  // 更新光标位置（不超出新内容长度）
+  newCursorPos = Math.min(newCursorPos, content.substring(0, deleteFrom).length)
+
+  // Vue 更新 textarea DOM 后恢复光标
+  nextTick(() => {
+    editor.setSelectionRange(newCursorPos, newCursorPos)
+  })
+
+  syncCursorToPreview()
 }
 
 // v-model on textarea needs a writable ref; we bind to ws.currentContent
@@ -388,6 +456,27 @@ function exportFile() {
   URL.revokeObjectURL(url)
 }
 
+async function handleFileSelect(path: string) {
+  // Don't prompt if clicking the same file
+  if (path === ws.currentFilePath.value) return
+
+  ws.clearAutoSaveTimer()
+
+  if (ws.isDirty.value) {
+    const result = await showSwitchConfirmDialog()
+    if (result === 'save') {
+      await ws.saveCurrentFile()
+    } else if (result === 'cancel') {
+      ws.scheduleAutoSave()
+      return
+    }
+    // 'discard': fall through to switch without saving
+  }
+
+  ws.openFile(path)
+  ws.scheduleAutoSave()
+}
+
 async function handleClose() {
   activeMenu.value = null
 
@@ -409,7 +498,7 @@ async function handleClose() {
   }
 }
 
-function showCloseConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
+function showConfirmDialog(message: string, saveLabel: string): Promise<'save' | 'discard' | 'cancel'> {
   return new Promise((resolve) => {
     const overlay = document.createElement('div')
     overlay.className = 'modal-overlay'
@@ -419,12 +508,12 @@ function showCloseConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
           <h2 class="modal-title">文件未保存</h2>
         </div>
         <div class="modal-body" style="color:#d4d4d4;text-align:center;padding:16px 0">
-          <p>当前文件尚未保存，是否保存后再关闭？</p>
+          <p>${message}</p>
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;padding:0 20px 16px">
-          <button class="btn-cancel" id="close-btn-discard">不保存</button>
-          <button class="btn-cancel" id="close-btn-cancel">取消</button>
-          <button class="btn-connect" id="close-btn-save">保存并关闭</button>
+          <button class="btn-cancel" id="confirm-btn-discard">不保存</button>
+          <button class="btn-cancel" id="confirm-btn-cancel">取消</button>
+          <button class="btn-connect" id="confirm-btn-save">${saveLabel}</button>
         </div>
       </div>
     `
@@ -434,15 +523,15 @@ function showCloseConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
       overlay.remove()
     }
 
-    overlay.querySelector('#close-btn-save')?.addEventListener('click', () => {
+    overlay.querySelector('#confirm-btn-save')?.addEventListener('click', () => {
       cleanup()
       resolve('save')
     })
-    overlay.querySelector('#close-btn-discard')?.addEventListener('click', () => {
+    overlay.querySelector('#confirm-btn-discard')?.addEventListener('click', () => {
       cleanup()
       resolve('discard')
     })
-    overlay.querySelector('#close-btn-cancel')?.addEventListener('click', () => {
+    overlay.querySelector('#confirm-btn-cancel')?.addEventListener('click', () => {
       cleanup()
       resolve('cancel')
     })
@@ -453,6 +542,14 @@ function showCloseConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
       }
     })
   })
+}
+
+function showSwitchConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
+  return showConfirmDialog('当前文件尚未保存，是否保存后再切换？', '保存并切换')
+}
+
+function showCloseConfirmDialog(): Promise<'save' | 'discard' | 'cancel'> {
+  return showConfirmDialog('当前文件尚未保存，是否保存后再关闭？', '保存并关闭')
 }
 
 function toggleSidebar() {
@@ -670,8 +767,56 @@ onUnmounted(() => {
   color: #d4d4d4;
 }
 
+
+.about-body {
+  text-align: center;
+  color: #d4d4d4;
+}
+
+.about-name {
+  font-size: 18px;
+  margin-bottom: 4px;
+}
+
+.about-version {
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 12px;
+}
+
+.about-desc {
+  font-size: 13px;
+  color: #aaa;
+  line-height: 1.5;
+}
+
+.about-divider {
+  height: 1px;
+  background-color: #444;
+  margin: 16px 0;
+}
+
+.about-contact {
+  font-size: 13px;
+  color: #bbb;
+  line-height: 1.8;
+}
+
+.about-email {
+  color: #6db3f8;
+  text-decoration: none;
+}
+
+.about-email:hover {
+  text-decoration: underline;
+}
+
+</style>
+
+<!-- Non-scoped styles for dynamically created modals and AsciiDoc rendered HTML (v-html content) -->
+<style>
 /* -------------------------
-   Modal
+   Modal (used by both template About dialog and dynamic confirm dialog)
    ------------------------- */
 .modal-overlay {
   position: fixed;
@@ -721,53 +866,39 @@ onUnmounted(() => {
   color: #fff;
 }
 
-.about-body {
-  text-align: center;
-  color: #d4d4d4;
+.btn-cancel {
+  padding: 8px 20px;
+  background-color: transparent;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 14px;
 }
 
-.about-name {
-  font-size: 18px;
-  margin-bottom: 4px;
+.btn-cancel:hover {
+  background-color: #4a4f5a;
 }
 
-.about-version {
-  font-size: 13px;
-  color: #888;
-  margin-bottom: 12px;
+.btn-connect {
+  padding: 8px 24px;
+  background-color: #4caf50;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  font-size: 14px;
 }
 
-.about-desc {
-  font-size: 13px;
-  color: #aaa;
-  line-height: 1.5;
+.btn-connect:hover:not(:disabled) {
+  background-color: #45a049;
 }
 
-.about-divider {
-  height: 1px;
-  background-color: #444;
-  margin: 16px 0;
+.btn-connect:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
-.about-contact {
-  font-size: 13px;
-  color: #bbb;
-  line-height: 1.8;
-}
-
-.about-email {
-  color: #6db3f8;
-  text-decoration: none;
-}
-
-.about-email:hover {
-  text-decoration: underline;
-}
-
-</style>
-
-<!-- Non-scoped styles for AsciiDoc rendered HTML (v-html content) -->
-<style>
 /* -------------------------
    Asciidoc Rendering Styles (For Preview)
    ------------------------------- */
