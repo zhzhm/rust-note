@@ -44,7 +44,7 @@ auto_install = true   # fetch the runtime when CodeGraph is enabled but missing
 # Rules are "ToolName" or "ToolName(glob)"; '*' matches any run, '?' one char.
 mode  = "ask"
 # deny = ["bash(rm -rf*)", "bash(git push*)"]   # hard-blocked in every mode
-allow = ["explore", "edit_file=src/App.vue", "bash=cd /work/dev/rust-note && npx tsc --noEmit --target es2020 --module esnext --moduleResolution bundler --strict \"src/App.vue\" 2>&1 | head -20", "bash=cd / && find . -name \"App.vue\" -path \"*/src/App.vue\" 2>/dev/null | head -5", "bash=pwd && ls", "bash=npx vue-tsc --noEmit 2>&1 | head -30", "bash=npx vite build 2>&1 | tail -15", "bash=cd /c/work/dev/rust-note && npx vue-tsc --noEmit 2>&1"]
+allow = ["explore", "edit_file=src/App.vue", "bash=cd /work/dev/rust-note && npx tsc --noEmit --target es2020 --module esnext --moduleResolution bundler --strict \"src/App.vue\" 2>&1 | head -20", "bash=cd / && find . -name \"App.vue\" -path \"*/src/App.vue\" 2>/dev/null | head -5", "bash=pwd && ls", "bash=npx vue-tsc --noEmit 2>&1 | head -30", "bash=npx vite build 2>&1 | tail -15", "bash=cd /c/work/dev/rust-note && npx vue-tsc --noEmit 2>&1", "edit_file=src-tauri/Cargo.toml", "write_file=src-tauri/src/crypto.rs", "edit_file=src-tauri/src/lib.rs", "edit_file=src-tauri/src/workspace/mod.rs", "bash=cd /c/work/dev/rust-note && cargo build 2>&1", "bash=cd /c/work/dev/rust-note/src-tauri && cargo build 2>&1"]
 # ask = ["write_file"]   # force a prompt even if otherwise allowed
 
 [sandbox]

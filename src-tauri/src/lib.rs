@@ -1,3 +1,4 @@
+mod crypto;
 mod workspace;
 
 use std::sync::Arc;

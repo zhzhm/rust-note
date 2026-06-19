@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::RwLock;
 
+use crate::crypto;
 use backend::{FileBackend, FileEntry};
 use local::LocalBackend;
 use webdav::WebDavBackend;
@@ -36,6 +37,10 @@ pub struct WebDavConfig {
     pub username: String,
     pub password: String,
     pub base_path: Option<String>,
+    /// AES-256-GCM 加密后的密码（存储在 settings.json），
+    /// 加载时自动解密到 password 字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_password: Option<String>,
 }
 
 impl Default for Settings {
@@ -84,6 +89,37 @@ fn create_backend(settings: &Settings) -> Result<Box<dyn FileBackend>, String> {
     }
 }
 
+// ---- 加密/解密辅助函数 ----
+
+/// 将 Settings 中的 WebDAV 密码加密存储到 encrypted_password 字段
+fn encrypt_settings_password(settings: &mut Settings) -> Result<(), String> {
+    if let Some(ref mut cfg) = settings.webdav {
+        if !cfg.password.is_empty() {
+            let key = crypto::get_machine_key()?;
+            let encrypted = crypto::encrypt_password(&cfg.password, &key)?;
+            cfg.encrypted_password = Some(encrypted);
+            cfg.password.clear(); // 明文不在磁盘上保留
+        }
+    }
+    Ok(())
+}
+
+/// 从 Settings 中的 encrypted_password 字段解密出明文密码
+fn decrypt_settings_password(settings: &mut Settings) -> Result<(), String> {
+    if let Some(ref mut cfg) = settings.webdav {
+        if let Some(ref encrypted) = cfg.encrypted_password {
+            if cfg.password.is_empty() {
+                let key = crypto::get_machine_key()?;
+                let decrypted = crypto::decrypt_password(encrypted, &key)?;
+                cfg.password = decrypted;
+            }
+            // 内存中不保留密文
+            cfg.encrypted_password = None;
+        }
+    }
+    Ok(())
+}
+
 // ---- Tauri Commands ----
 
 #[tauri::command]
@@ -105,7 +141,11 @@ pub async fn load_settings(
         fs::read_to_string(&settings_path).map_err(|e| format!("无法读取设置文件: {}", e))?;
 
     match serde_json::from_str::<Settings>(&content) {
-        Ok(settings) => {
+        Ok(mut settings) => {
+            // 解密 WebDAV 密码
+            if let Err(e) = decrypt_settings_password(&mut settings) {
+                eprintln!("解密 WebDAV 密码失败: {}", e);
+            }
             let backend = create_backend(&settings)?;
             *state.backend.write().await = backend;
             *state.settings.write().await = settings.clone();
@@ -126,9 +166,12 @@ pub async fn load_settings(
 pub async fn save_settings(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> Result<(), String> {
     let settings_path = get_settings_path(&app_handle)?;
+
+    // 加密 WebDAV 密码后再写入磁盘
+    encrypt_settings_password(&mut settings)?;
 
     let content =
         serde_json::to_string_pretty(&settings).map_err(|e| format!("无法序列化设置: {}", e))?;
@@ -164,11 +207,14 @@ pub async fn connect_webdav(
         format!("连接失败: {}\n请检查 URL、用户名和密码是否正确", e)
     })?;
 
-    let settings = Settings {
+    let mut settings = Settings {
         workspace_dir: None,
         backend_type: BackendType::WebDAV,
         webdav: Some(config),
     };
+
+    // 加密 WebDAV 密码后再写入磁盘
+    encrypt_settings_password(&mut settings)?;
 
     // Save settings
     let settings_path = get_settings_path(&app_handle)?;
