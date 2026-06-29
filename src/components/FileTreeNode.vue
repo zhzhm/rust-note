@@ -12,7 +12,7 @@
       </span>
       <span class="file-name">{{ entry.name }}</span>
     </div>
-    <template v-if="entry.is_dir && entry.children && entry.children.length > 0">
+    <template v-if="entry.is_dir && entry.children != null">
       <FileTreeNode
         v-for="child in entry.children"
         :key="child.path"

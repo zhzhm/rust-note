@@ -246,8 +246,22 @@ function greeting(name) {
 
     try {
       const path = isWebDAV.value ? '' : (workspaceDir.value || '')
-      const entries = await invoke<FileEntry[]>('list_directory', { path })
-      files.value = entries
+      const newEntries = await invoke<FileEntry[]>('list_directory', { path })
+
+      if (files.value.length > 0) {
+        // Always preserve children cache for already expanded directories
+        // This keeps the expansion state after refresh
+        const mergedEntries = newEntries.map(newEntry => {
+          const oldEntry = files.value.find(e => e.path === newEntry.path)
+          if (oldEntry && oldEntry.is_dir && oldEntry.children != null && oldEntry.children.length > 0) {
+            return { ...newEntry, children: oldEntry.children }
+          }
+          return newEntry
+        })
+        files.value = mergedEntries
+      } else {
+        files.value = newEntries
+      }
     } catch (e) {
       error.value = `加载文件列表失败: ${e}`
       files.value = []
@@ -258,7 +272,11 @@ function greeting(name) {
     // Build file index in the background (non-blocking)
     // so the file tree renders immediately
     if (hasWorkspace()) {
-      buildFileIndex().catch(() => {})
+      buildFileIndex().then(() => {
+        // After index is updated, refresh all expanded directories' children from cache
+        // This ensures new files/dirs appear immediately in expanded parent directories
+        refreshExpandedDirectories(files.value)
+      }).catch(() => {})
     }
   }
 
@@ -343,7 +361,12 @@ function greeting(name) {
   function refreshExpandedDirectories(entries: FileEntry[]) {
     for (const entry of entries) {
       if (entry.is_dir && entry.children != null && fileIndex.value.length > 0) {
+        // Update children from the latest cache
         entry.children = findDirectChildren(entry.path)
+        // Recursively refresh any expanded subdirectories
+        if (entry.children) {
+          refreshExpandedDirectories(entry.children)
+        }
       }
     }
   }

@@ -347,6 +347,8 @@ async function handleNewFile() {
 
 async function handleNewDirectory() {
   if (!contextMenu.entry || !contextMenu.entry.is_dir) return
+  // Save entry reference before closing context menu
+  const entry = contextMenu.entry
   closeContextMenu()
   try {
     const { value } = await ElMessageBox.prompt('请输入目录名：', '新建文件夹', {
@@ -355,15 +357,17 @@ async function handleNewDirectory() {
       cancelButtonText: '取消',
     })
     if (value) {
-      emit('createDirectory', { parentPath: contextMenu.entry.path, name: value })
+      emit('createDirectory', { parentPath: entry.path, name: value })
     }
   } catch { /* cancelled */ }
 }
 
 async function handleRename() {
   if (!contextMenu.entry) return
-  const entryName = contextMenu.entry.name
-  const entryPath = contextMenu.entry.path
+  // Save references before closing context menu
+  const entry = contextMenu.entry
+  const entryName = entry.name
+  const entryPath = entry.path
   closeContextMenu()
   try {
     const { value } = await ElMessageBox.prompt('请输入新名称：', '重命名', {
@@ -385,9 +389,11 @@ function handleCopy() {
 
 async function handleDelete() {
   if (!contextMenu.entry) return
-  const typeLabel = contextMenu.entry.is_dir ? '目录' : '文件'
-  const entryName = contextMenu.entry.name
-  const entryPath = contextMenu.entry.path
+  // Save references before closing context menu
+  const entry = contextMenu.entry
+  const typeLabel = entry.is_dir ? '目录' : '文件'
+  const entryName = entry.name
+  const entryPath = entry.path
   closeContextMenu()
   try {
     await ElMessageBox.confirm(

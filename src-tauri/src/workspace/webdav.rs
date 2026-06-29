@@ -31,6 +31,7 @@ impl WebDavBackend {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .map_err(|e| format!("无法创建 HTTP 客户端: {}", e))?;
 
@@ -46,12 +47,32 @@ impl WebDavBackend {
     }
 
     fn full_url(&self, path: &str) -> String {
-        let path = path.trim_start_matches('/');
-        if path.is_empty() {
-            format!("{}{}", self.base_url, self.base_path)
-        } else {
-            format!("{}{}/{}", self.base_url, self.base_path, path)
+        use urlencoding::encode;
+
+        // Start with base URL without trailing slash
+        let mut parts = vec![self.base_url.trim_end_matches('/').to_string()];
+
+        // Add base_path segments
+        if !self.base_path.is_empty() {
+            // base_path starts with /, so skip the first empty segment
+            for segment in self.base_path.split('/').skip(1) {
+                if !segment.is_empty() {
+                    parts.push(encode(segment).to_string());
+                }
+            }
         }
+
+        // Add requested path segments
+        if !path.is_empty() {
+            for segment in path.split('/') {
+                if !segment.is_empty() {
+                    parts.push(encode(segment).to_string());
+                }
+            }
+        }
+
+        // Join all parts with /
+        parts.join("/")
     }
 
     /// Extract the path portion from an href (handles both full URLs and path-only strings)
@@ -223,11 +244,7 @@ fn parse_propfind_response(
                                             name,
                                             path: rel_path,
                                             is_dir: is_collection,
-                                            children: if is_collection {
-                                                Some(vec![])
-                                            } else {
-                                                None
-                                            },
+                                            children: None,
                                         });
                                     }
                                 }
@@ -273,14 +290,20 @@ fn parse_propfind_response(
 #[async_trait]
 impl FileBackend for WebDavBackend {
     async fn list_directory(&self, path: &str) -> Result<Vec<FileEntry>, String> {
-        let mut url = self.full_url(path);
-        if !url.ends_with('/') {
-            url.push('/');
+        let url = self.full_url(path);
+        let mut url_with_slash = url;
+        if !url_with_slash.ends_with('/') {
+            url_with_slash.push('/');
         }
+
+        let method = match reqwest::Method::from_bytes(b"PROPFIND") {
+            Ok(m) => m,
+            Err(e) => return Err(format!("无法创建 PROPFIND 方法: {}", e)),
+        };
 
         let response = self
             .client
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
+            .request(method, &url_with_slash)
             .header("Depth", "1")
             .send()
             .await
@@ -298,7 +321,7 @@ impl FileBackend for WebDavBackend {
             return Err("无权限访问该路径".to_string());
         }
         if !status.is_success() {
-            return Err(format!("WebDAV 请求失败: HTTP {}", status.as_u16()));
+            return Err(format!("WebDAV 请求失败: HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or_default()));
         }
 
         let body = response
@@ -366,14 +389,11 @@ impl FileBackend for WebDavBackend {
     }
 
     async fn create_file(&self, parent_path: &str, name: &str) -> Result<FileEntry, String> {
-        let parent = if parent_path.is_empty() {
-            String::new()
-        } else if parent_path.ends_with('/') {
-            parent_path.to_string()
+        let file_path = if parent_path.is_empty() {
+            name.to_string()
         } else {
-            format!("{}/", parent_path)
+            format!("{}/{}", parent_path.trim_end_matches('/'), name)
         };
-        let file_path = format!("{}{}", parent, name);
         let url = self.full_url(&file_path);
 
         let response = self
@@ -390,7 +410,7 @@ impl FileBackend for WebDavBackend {
             return Err("认证失败，请检查用户名和密码".to_string());
         }
         if !status.is_success() {
-            return Err(format!("WebDAV 创建文件失败: HTTP {}", status.as_u16()));
+            return Err(format!("WebDAV 创建文件失败: HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or_default()));
         }
 
         Ok(FileEntry {
@@ -402,25 +422,30 @@ impl FileBackend for WebDavBackend {
     }
 
     async fn create_directory(&self, parent_path: &str, name: &str) -> Result<FileEntry, String> {
-        let parent = if parent_path.is_empty() {
-            String::new()
-        } else if parent_path.ends_with('/') {
-            parent_path.to_string()
+        let dir_path = if parent_path.is_empty() {
+            name.to_string()
         } else {
-            format!("{}/", parent_path)
+            format!("{}/{}", parent_path.trim_end_matches('/'), name)
         };
-        let dir_path = format!("{}{}", parent, name);
-        let mut url = self.full_url(&dir_path);
-        if !url.ends_with('/') {
-            url.push('/');
+        let url = self.full_url(&dir_path);
+        let mut url_with_slash = url;
+        if !url_with_slash.ends_with('/') {
+            url_with_slash.push('/');
         }
 
-        let response = self
+        let method = match reqwest::Method::from_bytes(b"MKCOL") {
+            Ok(m) => m,
+            Err(e) => return Err(format!("无法创建 MKCOL 方法: {}", e)),
+        };
+
+        let response = match self
             .client
-            .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), &url)
+            .request(method, &url_with_slash)
             .send()
-            .await
-            .map_err(|e| format!("WebDAV 请求失败: {}", e))?;
+            .await {
+                Ok(r) => r,
+                Err(e) => return Err(format!("WebDAV 请求失败: {}", e)),
+            };
 
         let status = response.status();
 
@@ -430,15 +455,18 @@ impl FileBackend for WebDavBackend {
         if status == 405 {
             return Err(format!("目录已存在或无权限: {}", name));
         }
+        if status == 409 {
+            return Err(format!("无法创建目录，父目录不存在: {}", name));
+        }
         if !status.is_success() {
-            return Err(format!("WebDAV 创建目录失败: HTTP {}", status.as_u16()));
+            return Err(format!("WebDAV 创建目录失败: HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or_default()));
         }
 
         Ok(FileEntry {
             name: name.to_string(),
-            path: format!("{}{}", parent, name),
+            path: dir_path,
             is_dir: true,
-            children: Some(vec![]),
+            children: None,
         })
     }
 
@@ -470,9 +498,14 @@ impl FileBackend for WebDavBackend {
         let src_url = self.full_url(src);
         let dst_url = self.full_url(dst);
 
+        let method = match reqwest::Method::from_bytes(b"COPY") {
+            Ok(m) => m,
+            Err(e) => return Err(format!("无法创建 COPY 方法: {}", e)),
+        };
+
         let response = self
             .client
-            .request(reqwest::Method::from_bytes(b"COPY").unwrap(), &src_url)
+            .request(method, &src_url)
             .header("Destination", &dst_url)
             .send()
             .await
@@ -510,9 +543,14 @@ impl FileBackend for WebDavBackend {
         };
         let dst_url = self.full_url(&dst_path);
 
+        let method = match reqwest::Method::from_bytes(b"MOVE") {
+            Ok(m) => m,
+            Err(e) => return Err(format!("无法创建 MOVE 方法: {}", e)),
+        };
+
         let response = self
             .client
-            .request(reqwest::Method::from_bytes(b"MOVE").unwrap(), &src_url)
+            .request(method, &src_url)
             .header("Destination", &dst_url)
             .send()
             .await

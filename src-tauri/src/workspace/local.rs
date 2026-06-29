@@ -52,7 +52,7 @@ impl LocalBackend {
                 name,
                 path: entry_path.to_string_lossy().to_string(),
                 is_dir,
-                children: if is_dir { Some(vec![]) } else { None },
+                children: None,
             });
         }
 
@@ -116,7 +116,7 @@ impl LocalBackend {
                 name,
                 path: entry_path.to_string_lossy().to_string(),
                 is_dir,
-                children: if is_dir { Some(vec![]) } else { None },
+                children: None,
             });
         }
 
