@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install *)",
+      "Bash(cargo build *)",
+      "Bash(Remove-Item -Path \"c:\\\\work\\\\dev\\\\rust-note\\\\src-tauri\\\\src\\\\workspace.rs\" -Force)",
+      "Bash(npx vue-tsc *)",
+      "Bash(npx vite *)",
+      "Bash(pnpm tauri *)"
+    ]
+  }
+}

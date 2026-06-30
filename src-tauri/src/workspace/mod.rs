@@ -275,23 +275,23 @@ pub async fn write_file(
 
 #[tauri::command]
 pub async fn create_file(
-    parentPath: String,
+    parent_path: String,
     name: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<FileEntry, String> {
     let backend = state.backend.read().await;
-    let result = backend.create_file(&parentPath, &name).await;
+    let result = backend.create_file(&parent_path, &name).await;
     result
 }
 
 #[tauri::command]
 pub async fn create_directory(
-    parentPath: String,
+    parent_path: String,
     name: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<FileEntry, String> {
     let backend = state.backend.read().await;
-    let result = backend.create_directory(&parentPath, &name).await;
+    let result = backend.create_directory(&parent_path, &name).await;
     result
 }
 
@@ -307,22 +307,22 @@ pub async fn delete_file(
 
 #[tauri::command]
 pub async fn copy_entry(
-    sourcePath: String,
-    destPath: String,
+    source_path: String,
+    dest_path: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<FileEntry, String> {
     let backend = state.backend.read().await;
-    let result = backend.copy_entry(&sourcePath, &destPath).await;
+    let result = backend.copy_entry(&source_path, &dest_path).await;
     result
 }
 
 #[tauri::command]
 pub async fn rename_entry(
     path: String,
-    newName: String,
+    new_name: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<FileEntry, String> {
     let backend = state.backend.read().await;
-    let result = backend.rename_entry(&path, &newName).await;
+    let result = backend.rename_entry(&path, &new_name).await;
     result
 }
