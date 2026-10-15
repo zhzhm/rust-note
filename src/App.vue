@@ -22,6 +22,15 @@
             <div class="dropdown-item" @click="togglePreview">切换预览</div>
           </div>
         </div>
+        <div class="menu-item" @click="toggleMenu('search')">
+          <span class="menu-label">搜索</span>
+          <div v-if="activeMenu === 'search'" class="dropdown">
+            <div class="dropdown-item" @click.stop="focusContentSearch">
+              搜索文件内容 <span class="shortcut-hint">Ctrl+Shift+F</span>
+            </div>
+            <div class="dropdown-item" @click.stop="focusFileNameSearch">搜索文件名</div>
+          </div>
+        </div>
         <div class="menu-item" @click="toggleMenu('help')">
           <span class="menu-label">帮助</span>
           <div v-if="activeMenu === 'help'" class="dropdown">
@@ -36,6 +45,7 @@
       <!-- 左侧目录树 -->
       <Sidebar
         v-if="showSidebar"
+        ref="sidebarRef"
         :files="ws.files.value"
         :current-file-path="ws.currentFilePath.value"
         :workspace-dir="ws.workspaceDir.value"
@@ -45,6 +55,11 @@
         :error="ws.error.value"
         :file-index="ws.fileIndex.value"
         :is-indexing="ws.isIndexing.value"
+        :content-results="ws.searchResults.value"
+        :content-total-matches="ws.searchTotalMatches.value"
+        :content-truncated="ws.searchTruncated.value"
+        :is-content-searching="ws.isContentSearching.value"
+        :has-content-searched="ws.hasSearched.value"
         @select-file="handleFileSelect"
         @expand-directory="ws.expandDirectory"
         @create-file="handleSidebarCreateFile"
@@ -55,6 +70,8 @@
         @open-folder="openFolder"
         @clear-error="ws.error.value = null"
         @refresh-index="ws.buildFileIndex()"
+        @search-content="handleSearchContent"
+        @open-match="handleOpenMatch"
       />
 
       <!-- 主编辑区域 -->
@@ -148,6 +165,7 @@ const showWebDavDialog = ref(false)
 const webDavConnecting = ref(false)
 const webDavError = ref<string | null>(null)
 const isDragging = ref(false)
+const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null)
 
 // --- scroll sync ---
 const editorRef = ref<HTMLTextAreaElement | null>(null)
@@ -388,6 +406,81 @@ function handleSidebarCreateDirectory(payload: { parentPath: string; name: strin
   ws.createDirectory(payload.parentPath, payload.name)
 }
 
+// ---- 全文搜索 ----
+
+function handleSearchContent(payload: { query: string; caseSensitive: boolean }) {
+  ws.searchContent(payload.query, payload.caseSensitive)
+}
+
+/** 双击搜索结果：打开文件并把光标定位到匹配行 */
+async function handleOpenMatch(payload: { path: string; line: number | null }) {
+  if (payload.path === ws.currentFilePath.value) {
+    // 已打开的文件直接定位，避免重新读取丢失未保存内容
+    if (payload.line) {
+      revealEditorLine(payload.line)
+    }
+    return
+  }
+
+  ws.clearAutoSaveTimer()
+  if (ws.isDirty.value) {
+    const result = await showSwitchConfirmDialog()
+    if (result === 'save') {
+      await ws.saveCurrentFile()
+    } else if (result === 'cancel') {
+      ws.scheduleAutoSave()
+      return
+    }
+  }
+
+  await ws.openFileAtLine(payload.path, payload.line)
+}
+
+// 搜索定位请求 → 编辑器滚动/光标
+watch(
+  () => ws.revealTarget.value,
+  (target) => {
+    if (!target) return
+    nextTick(() => revealEditorLine(target.line))
+  },
+)
+
+/** 把编辑器的光标移动到指定行，并把该行滚动到视口上三分之一处 */
+function revealEditorLine(lineNumber: number) {
+  const editor = editorRef.value
+  if (!editor) return
+
+  const lines = editor.value.split('\n')
+  const index = Math.max(0, Math.min(lineNumber - 1, lines.length - 1))
+
+  let offset = 0
+  for (let i = 0; i < index; i += 1) {
+    offset += lines[i].length + 1
+  }
+
+  editor.focus()
+  editor.setSelectionRange(offset, offset)
+
+  const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 22
+  editor.scrollTop = Math.max(0, index * lineHeight - editor.clientHeight / 3)
+
+  // 强制重新同步预览滚动
+  lastSyncedLine = -1
+  syncCursorToPreview()
+}
+
+function focusContentSearch() {
+  activeMenu.value = null
+  showSidebar.value = true
+  nextTick(() => sidebarRef.value?.focusContentSearch())
+}
+
+function focusFileNameSearch() {
+  activeMenu.value = null
+  showSidebar.value = true
+  nextTick(() => sidebarRef.value?.focusFileNameSearch())
+}
+
 function saveFile() {
   activeMenu.value = null
   ws.saveCurrentFile()
@@ -398,6 +491,12 @@ function handleKeyDown(e: KeyboardEvent) {
   if (mod && e.key === 's') {
     e.preventDefault()
     ws.saveCurrentFile()
+    return
+  }
+  // Ctrl/Cmd+Shift+F — 工作区全文搜索
+  if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault()
+    focusContentSearch()
   }
 }
 

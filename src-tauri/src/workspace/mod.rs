@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod local;
+pub mod search;
 pub mod webdav;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,7 @@ use tokio::sync::RwLock;
 use crate::crypto;
 use backend::{FileBackend, FileEntry};
 use local::LocalBackend;
+use search::SearchResponse;
 use webdav::WebDavBackend;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -324,5 +326,21 @@ pub async fn rename_entry(
 ) -> Result<FileEntry, String> {
     let backend = state.backend.read().await;
     let result = backend.rename_entry(&path, &new_name).await;
+    result
+}
+
+/// 在当前工作区中按内容全文搜索。
+///
+/// `path` 为工作区根目录（WebDAV 后端传空字符串表示根），
+/// `case_sensitive` 为 true 时区分大小写。
+#[tauri::command]
+pub async fn search_workspace(
+    path: String,
+    query: String,
+    case_sensitive: bool,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<SearchResponse, String> {
+    let backend = state.backend.read().await;
+    let result = backend.search_content(&path, &query, case_sensitive).await;
     result
 }

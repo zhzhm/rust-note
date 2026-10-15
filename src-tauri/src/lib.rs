@@ -30,6 +30,7 @@ pub fn run() {
             workspace::delete_file,
             workspace::copy_entry,
             workspace::rename_entry,
+            workspace::search_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

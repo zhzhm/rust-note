@@ -40,57 +40,151 @@
       {{ error }}
     </div>
 
-    <div class="search-box">
-      <button
-        class="refresh-btn"
-        :class="{ spinning: isIndexing }"
-        @click="$emit('refreshIndex')"
-        title="刷新文件索引"
-        :disabled="isIndexing"
-      >↻</button>
-      <input
-        v-model="searchQuery"
-        type="text"
-        class="search-input"
-        placeholder="搜索文件..."
-        @keydown.esc="clearSearch"
-      />
-      <button v-if="isSearching" class="search-clear" @click="clearSearch" title="清除搜索">×</button>
+    <div class="search-panel">
+      <!-- 模式切换：用带文字的标签页区分「文件名」与「内容」搜索 -->
+      <div class="search-modes">
+        <div class="mode-tabs" role="tablist">
+          <button
+            class="mode-tab"
+            :class="{ active: searchMode === 'name' }"
+            role="tab"
+            :aria-selected="searchMode === 'name'"
+            @click="setSearchMode('name')"
+            title="按文件名搜索（支持中文拼音）"
+          >🔍 文件名</button>
+          <button
+            class="mode-tab"
+            :class="{ active: searchMode === 'content' }"
+            role="tab"
+            :aria-selected="searchMode === 'content'"
+            @click="setSearchMode('content')"
+            title="按文件内容全文搜索（Ctrl+Shift+F）"
+          >📝 内容</button>
+        </div>
+        <button
+          class="refresh-btn"
+          :class="{ spinning: isIndexing }"
+          @click="$emit('refreshIndex')"
+          title="刷新文件索引"
+          :disabled="isIndexing"
+        >↻</button>
+      </div>
+
+      <div class="search-box">
+        <input
+          ref="searchInputRef"
+          v-model="activeQuery"
+          type="text"
+          class="search-input"
+          :class="{ 'content-mode': searchMode === 'content' }"
+          :placeholder="searchMode === 'name' ? '搜索文件名...' : '搜索文件内容...'"
+          @keydown.esc="clearQuery"
+        />
+        <button
+          class="case-btn"
+          :class="{ active: caseSensitive && searchMode === 'content', 'is-hidden': searchMode === 'name' }"
+          :disabled="searchMode === 'name'"
+          :aria-hidden="searchMode === 'name'"
+          :tabindex="searchMode === 'name' ? -1 : 0"
+          @click="caseSensitive = !caseSensitive"
+          :title="caseSensitive ? '区分大小写（点击关闭）' : '忽略大小写（点击开启）'"
+        >Aa</button>
+        <button v-if="hasQuery" class="search-clear" @click="clearQuery" title="清除">×</button>
+      </div>
     </div>
 
     <div class="file-tree">
-      <!-- Search results mode -->
-      <template v-if="isSearching">
-        <div v-if="searchResults.length === 0" class="empty-text">无匹配文件</div>
-        <div
-          v-for="result in searchResults"
-          :key="result.entry.path"
-          class="search-result-item"
-          :class="{ active: result.entry.path === currentFilePath }"
-          @click="handleSearchResultClick(result.entry.path)"
-        >
-          <span class="result-name" v-html="highlightMatch(result.entry.name, searchQuery.trim())"></span>
-          <span v-if="result.relativePath" class="result-path">{{ result.relativePath }}</span>
-        </div>
+      <!-- 文件名搜索模式 -->
+      <template v-if="searchMode === 'name'">
+        <template v-if="isSearching">
+          <div class="search-summary">
+            <span class="summary-icon">🔍</span>
+            <span>{{ searchResults.length }} 个文件名匹配</span>
+            <span v-if="isIndexing" class="summary-loading" title="正在构建文件索引">↻</span>
+          </div>
+          <div v-if="searchResults.length === 0" class="empty-text">无匹配文件</div>
+          <div
+            v-for="result in searchResults"
+            :key="result.entry.path"
+            class="search-result-item"
+            :class="{ active: result.entry.path === currentFilePath }"
+            @click="handleSearchResultClick(result.entry.path)"
+          >
+            <span class="result-name" v-html="highlightMatch(result.entry.name, searchQuery.trim())"></span>
+            <span v-if="result.relativePath" class="result-path">{{ result.relativePath }}</span>
+          </div>
+        </template>
+
+        <!-- Normal tree mode -->
+        <template v-else>
+          <div v-if="isLoading" class="loading-text">加载中...</div>
+          <div v-else-if="files.length === 0 && !isLoading" class="empty-text">
+            暂无文件。请通过 文件 → 打开文件夹 选择工作目录，或点击 + 新建文件。
+          </div>
+          <template v-else>
+            <FileTreeNode
+              v-for="entry in files"
+              :key="entry.path"
+              :entry="entry"
+              :current-path="currentFilePath"
+              :depth="0"
+              @select="(path: string) => $emit('selectFile', path)"
+              @expand="(entry: FileEntry) => $emit('expandDirectory', entry)"
+              @contextmenu="showContextMenu"
+            />
+          </template>
+        </template>
       </template>
 
-      <!-- Normal tree mode -->
+      <!-- 内容全文搜索模式 -->
       <template v-else>
-        <div v-if="isLoading" class="loading-text">加载中...</div>
-        <div v-else-if="files.length === 0 && !isLoading" class="empty-text">
-          暂无文件。请通过 文件 → 打开文件夹 选择工作目录，或点击 + 新建文件。
+        <div v-if="!hasWorkspace" class="empty-text">请先打开文件夹或连接 WebDAV。</div>
+        <div v-else-if="!contentQuery.trim()" class="empty-text">
+          输入关键词，搜索工作区中所有文件的内容。双击结果可打开文件并跳转到匹配行。
         </div>
+        <div v-else-if="isContentSearching && !hasContentSearched" class="loading-text">搜索中...</div>
         <template v-else>
-          <FileTreeNode
-            v-for="entry in files"
-            :key="entry.path"
-            :entry="entry"
-            :current-path="currentFilePath"
-            :depth="0"
-            @select="(path: string) => $emit('selectFile', path)"
-            @expand="(entry: FileEntry) => $emit('expandDirectory', entry)"
-            @contextmenu="showContextMenu"
-          />
+          <div v-if="hasContentSearched" class="search-summary">
+            <span class="summary-icon">📝</span>
+            <span>{{ contentTotalMatches }} 处匹配 · {{ contentResults.length }} 个文件</span>
+            <span v-if="isContentSearching" class="summary-loading" title="搜索中">↻</span>
+            <span v-if="contentTruncated" class="summary-warn" title="结果过多，仅显示前一部分">已截断</span>
+          </div>
+          <div v-else class="loading-text">搜索中...</div>
+
+          <div v-if="hasContentSearched && contentResults.length === 0" class="empty-text">
+            无匹配内容
+          </div>
+
+          <div v-for="file in contentResults" :key="file.path" class="content-group">
+            <div
+              class="content-file"
+              :class="{ active: file.path === currentFilePath }"
+              :title="file.path"
+              @dblclick="openContentFile(file)"
+            >
+              <span class="content-file-icon">📄</span>
+              <span class="content-file-name">{{ file.name }}</span>
+              <span class="content-file-count">{{ file.match_count }}</span>
+            </div>
+            <div
+              v-for="match in file.matches"
+              :key="file.path + ':' + match.line"
+              class="content-match"
+              :class="{ selected: isSelectedMatch(file.path, match.line) }"
+              @click="selectedMatch = { path: file.path, line: match.line }"
+              @dblclick="openContentMatch(file.path, match.line)"
+            >
+              <span class="content-line-no">{{ match.line }}</span>
+              <span class="content-line-text">
+                <span v-html="highlightContent(match.text)"></span>
+                <span v-if="match.next_line" class="content-line-next">{{ match.next_line }}</span>
+              </span>
+            </div>
+            <div v-if="file.match_count > file.matches.length" class="content-more">
+              … 还有 {{ file.match_count - file.matches.length }} 处匹配未显示
+            </div>
+          </div>
         </template>
       </template>
     </div>
@@ -141,10 +235,10 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed } from 'vue'
+import { reactive, ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { ElMessageBox } from 'element-plus'
-import type { FileEntry } from '../composables/useWorkspace'
+import type { FileEntry, SearchFileResult } from '../composables/useWorkspace'
 import FileTreeNode from './FileTreeNode.vue'
 
 const props = defineProps<{
@@ -157,6 +251,11 @@ const props = defineProps<{
   error: string | null
   fileIndex: FileEntry[]
   isIndexing: boolean
+  contentResults: SearchFileResult[]
+  contentTotalMatches: number
+  contentTruncated: boolean
+  isContentSearching: boolean
+  hasContentSearched: boolean
 }>()
 
 const emit = defineEmits<{
@@ -170,6 +269,8 @@ const emit = defineEmits<{
   openFolder: []
   clearError: []
   refreshIndex: []
+  searchContent: [payload: { query: string; caseSensitive: boolean }]
+  openMatch: [payload: { path: string; line: number | null }]
 }>()
 
 const displayName = computed(() => {
@@ -177,8 +278,106 @@ const displayName = computed(() => {
   return '项目文件'
 })
 
+const hasWorkspace = computed(() => props.isWebDAV || !!props.workspaceDir)
+
 // Search state
 const searchQuery = ref('')
+const contentQuery = ref('')
+/** 'name' = 按文件名过滤；'content' = 工作区全文搜索 */
+const searchMode = ref<'name' | 'content'>('name')
+const caseSensitive = ref(false)
+const searchInputRef = ref<HTMLInputElement | null>(null)
+/** 当前选中的匹配项（单击高亮，双击打开） */
+const selectedMatch = ref<{ path: string; line: number } | null>(null)
+
+/** 两个模式各自保留自己的输入内容 */
+const activeQuery = computed({
+  get: () => (searchMode.value === 'name' ? searchQuery.value : contentQuery.value),
+  set: (value: string) => {
+    if (searchMode.value === 'name') {
+      searchQuery.value = value
+    } else {
+      contentQuery.value = value
+    }
+  },
+})
+
+const hasQuery = computed(() => activeQuery.value.length > 0)
+
+function clearQuery() {
+  activeQuery.value = ''
+}
+
+/** 切换搜索模式（文件名 / 内容），两种模式各自保留输入内容 */
+function setSearchMode(mode: 'name' | 'content') {
+  if (searchMode.value === mode) {
+    nextTick(() => searchInputRef.value?.focus())
+    return
+  }
+  searchMode.value = mode
+  selectedMatch.value = null
+  nextTick(() => searchInputRef.value?.focus())
+}
+
+/** 供父组件调用：切到内容搜索并聚焦输入框（Ctrl+Shift+F） */
+function focusContentSearch() {
+  setSearchMode('content')
+  nextTick(() => searchInputRef.value?.focus())
+}
+
+/** 供父组件调用：聚焦文件名搜索框 */
+function focusFileNameSearch() {
+  setSearchMode('name')
+  nextTick(() => searchInputRef.value?.focus())
+}
+
+defineExpose({ focusContentSearch, focusFileNameSearch })
+
+// 内容搜索防抖：停止输入 350ms 后再请求后端
+const CONTENT_SEARCH_DEBOUNCE = 350
+let contentSearchTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleContentSearch() {
+  if (contentSearchTimer) clearTimeout(contentSearchTimer)
+  if (searchMode.value !== 'content') return
+  contentSearchTimer = setTimeout(() => {
+    contentSearchTimer = null
+    emit('searchContent', {
+      query: contentQuery.value,
+      caseSensitive: caseSensitive.value,
+    })
+  }, CONTENT_SEARCH_DEBOUNCE)
+}
+
+watch([contentQuery, caseSensitive, searchMode], () => {
+  selectedMatch.value = null
+  scheduleContentSearch()
+})
+
+// 切换工作区（本地目录 / WebDAV 后端）后，已有结果不再有效，需要重新搜索
+watch(
+  () => [props.workspaceDir, props.isWebDAV],
+  () => {
+    selectedMatch.value = null
+    scheduleContentSearch()
+  },
+)
+
+onBeforeUnmount(() => {
+  if (contentSearchTimer) clearTimeout(contentSearchTimer)
+})
+
+function isSelectedMatch(path: string, line: number): boolean {
+  return selectedMatch.value?.path === path && selectedMatch.value?.line === line
+}
+
+function openContentMatch(path: string, line: number) {
+  emit('openMatch', { path, line })
+}
+
+function openContentFile(file: SearchFileResult) {
+  emit('openMatch', { path: file.path, line: file.matches[0]?.line ?? null })
+}
 
 interface SearchResult {
   entry: FileEntry
@@ -225,12 +424,25 @@ const searchResults = computed<SearchResult[]>(() => {
 
 const isSearching = computed(() => searchQuery.value.trim().length > 0)
 
-function clearSearch() {
-  searchQuery.value = ''
-}
-
 function handleSearchResultClick(path: string) {
   emit('selectFile', path)
+}
+
+/** 内容搜索结果里高亮命中的关键词（忽略大小写，只高亮第一处） */
+function highlightContent(text: string): string {
+  const query = contentQuery.value.trim()
+  if (!query) return escapeHtml(text)
+
+  const index = caseSensitive.value
+    ? text.indexOf(query)
+    : text.toLowerCase().indexOf(query.toLowerCase())
+
+  if (index < 0) return escapeHtml(text)
+
+  const end = index + query.length
+  return escapeHtml(text.slice(0, index)) +
+    '<mark>' + escapeHtml(text.slice(index, end)) + '</mark>' +
+    escapeHtml(text.slice(end))
 }
 
 function highlightMatch(text: string, query: string): string {
@@ -504,9 +716,76 @@ async function handleDelete() {
   word-break: break-word;
 }
 
-.search-box {
-  position: relative;
+/* ---- 搜索面板：模式标签页 + 输入行 ---- */
+.search-panel {
   padding: 0 8px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.search-modes {
+  display: flex;
+  /* 让刷新按钮与标签容器自动等高 */
+  align-items: stretch;
+  gap: 4px;
+}
+
+/* 刷新按钮做成与标签容器同款外观，避免看起来像一个游离的字形 */
+.search-modes .refresh-btn {
+  width: 28px;
+  height: auto;
+  border: 1px solid #383d47;
+  border-radius: 5px;
+  background-color: #23262d;
+}
+
+.search-modes .refresh-btn:hover:not(:disabled) {
+  background-color: #2f343d;
+  color: #d4d4d4;
+}
+
+.mode-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background-color: #23262d;
+  border: 1px solid #383d47;
+  border-radius: 5px;
+}
+
+.mode-tab {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  /* 未选中也要看起来可点击，别像禁用态 */
+  color: #a3abb8;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 4px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.mode-tab:hover:not(.active) {
+  color: #d4d4d4;
+  background-color: #2f343d;
+}
+
+.mode-tab.active {
+  background-color: #3a4763;
+  color: #9dc0ff;
+  font-weight: 600;
+}
+
+.search-box {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -556,31 +835,34 @@ async function handleDelete() {
   border: 1px solid #444;
   border-radius: 4px;
   color: #d4d4d4;
-  padding: 6px 28px 6px 10px;
+  padding: 6px 10px;
   font-size: 13px;
   outline: none;
   transition: border-color 0.2s;
 }
 
 .search-input::placeholder {
-  color: #666;
+  color: #7a828e;
 }
 
 .search-input:focus {
   border-color: #5a8dee;
 }
 
+/* 清除按钮现在是 flex 子项，排在大小写/刷新按钮之前，避免与它们重叠 */
 .search-clear {
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  transform: translateY(-50%);
   background: none;
   border: none;
   color: #888;
   font-size: 16px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0;
+  width: 20px;
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   line-height: 1;
 }
 
@@ -627,6 +909,178 @@ async function handleDelete() {
   text-overflow: ellipsis;
   white-space: nowrap;
   margin-top: 2px;
+}
+
+/* ---- 大小写开关（仅内容模式显示） ---- */
+.case-btn {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 0;
+  width: 26px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+  line-height: 1;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.case-btn:hover {
+  color: #d4d4d4;
+  background-color: #2a2d35;
+}
+
+.case-btn.active {
+  color: #5a8dee;
+  background-color: #2a2d35;
+}
+
+/* 文件名模式下隐藏 Aa，但保留占位，避免切换模式时输入框宽度跳动 */
+.case-btn.is-hidden {
+  visibility: hidden;
+}
+
+/* 内容模式下输入框聚焦用更亮的蓝色，和标签页呼应 */
+.search-input.content-mode:focus {
+  border-color: #7ab4ff;
+}
+
+/* ---- 全文搜索结果 ---- */
+.search-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 8px 12px;
+  font-size: 11px;
+  color: #888;
+  border-bottom: 1px solid #2e323b;
+  margin-bottom: 4px;
+}
+
+.summary-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.summary-loading {
+  color: #5a8dee;
+  animation: spin 1s linear infinite;
+}
+
+.summary-warn {
+  color: #ffa726;
+}
+
+.content-group {
+  margin-bottom: 2px;
+}
+
+.content-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cfd3da;
+  background-color: #262a33;
+  user-select: none;
+}
+
+.content-file:hover {
+  background-color: #2f343f;
+}
+
+.content-file.active {
+  background-color: #3a3f4b;
+}
+
+.content-file-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.content-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-file-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: normal;
+  color: #8f97a3;
+  background-color: #333944;
+  border-radius: 8px;
+  padding: 0 6px;
+  line-height: 15px;
+}
+
+.content-match {
+  display: flex;
+  gap: 6px;
+  padding: 3px 12px 3px 16px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: monospace;
+  color: #b6bcc7;
+  user-select: none;
+  border-left: 2px solid transparent;
+}
+
+.content-match:hover {
+  background-color: #2a2e35;
+}
+
+.content-match.selected {
+  background-color: #313743;
+  border-left-color: #5a8dee;
+}
+
+.content-line-no {
+  flex-shrink: 0;
+  width: 26px;
+  text-align: right;
+  color: #626a76;
+  user-select: none;
+}
+
+.content-line-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-line-text :deep(mark) {
+  background-color: #5a8dee44;
+  color: #7ab4ff;
+  border-radius: 2px;
+}
+
+.content-line-next {
+  display: block;
+  color: #6d7481;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-more {
+  padding: 2px 12px 4px 42px;
+  font-size: 11px;
+  color: #6d7481;
 }
 
 .file-tree {

@@ -32,14 +32,24 @@ Once connected, all read/write operations go directly to your NAS. Notes are sav
 
 - Open any local folder as your workspace
 - File tree: browse, create, rename, copy, delete
-- Fuzzy file search (with pinyin-initial support for Chinese filenames)
+- Fuzzy file search (with pinyin support for Chinese filenames)
+
+### 🔎 Workspace Full-Text Search
+
+Search the contents of every file in the current workspace (IDE style) — works for both local and WebDAV workspaces:
+
+- Switch between the "🔍 file name" and "📄 content" tabs at the top of the sidebar; `Ctrl+Shift+F` jumps straight to content search
+- Results are grouped by file; each match shows its line number plus ~two lines of context with the keyword highlighted
+- **Double-click** a result to open the file with the cursor placed on the matching line, keeping editor and preview scroll in sync
+- Case-sensitivity toggle (`Aa`), 350 ms input debounce, and stale responses from fast typing are discarded
+- Hidden files, binary files, and files larger than 5 MiB are skipped automatically; results are truncated when there are too many
 
 ### 🎨 Interface
 
 - Dark theme, easy on the eyes
 - Draggable split between editor and preview panels
 - Scroll sync between editor and preview
-- Keyboard shortcut `Ctrl+S` to save, auto-save (30-second interval)
+- Keyboard shortcuts `Ctrl+S` to save and `Ctrl+Shift+F` for full-text search, auto-save (30-second interval)
 
 ## Quick Start
 

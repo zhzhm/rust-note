@@ -22,6 +22,35 @@ export interface Settings {
   webdav: WebDavConfig | null
 }
 
+/** 一处内容匹配（含两行左右预览上下文） */
+export interface SearchMatch {
+  line: number
+  text: string
+  next_line?: string | null
+}
+
+/** 单个文件的内容搜索结果 */
+export interface SearchFileResult {
+  path: string
+  name: string
+  matches: SearchMatch[]
+  match_count: number
+}
+
+/** 一次全文搜索的结果 */
+export interface SearchResponse {
+  files: SearchFileResult[]
+  total_matches: number
+  scanned_files: number
+  truncated: boolean
+}
+
+/** 需要在编辑器中定位到的目标（seq 保证同一行重复打开也能触发） */
+export interface RevealTarget {
+  line: number
+  seq: number
+}
+
 export function useWorkspace() {
   const settings = ref<Settings>({
     workspace_dir: null,
@@ -52,6 +81,20 @@ export function useWorkspace() {
   const error = ref<string | null>(null)
   const fileIndex = ref<FileEntry[]>([])
   const isIndexing = ref(false)
+
+  // --- 全文搜索状态 ---
+  const searchResults = ref<SearchFileResult[]>([])
+  const searchTotalMatches = ref(0)
+  const searchScannedFiles = ref(0)
+  const searchTruncated = ref(false)
+  const isContentSearching = ref(false)
+  /** 搜索已完成过至少一次（用于区分「没有匹配」与「还没搜」） */
+  const hasSearched = ref(false)
+  /** 编辑器需要定位到的行；seq 递增以支持重复定位同一行 */
+  const revealTarget = ref<RevealTarget | null>(null)
+  let revealSeq = 0
+  /** 用于丢弃过期的搜索响应（用户快速输入时） */
+  let searchToken = 0
 
   const isDirty = computed(() => currentContent.value !== lastSavedContent.value)
 
@@ -202,6 +245,8 @@ function greeting(name) {
       }
       await invoke('save_settings', { settings: newSettings })
       settings.value = newSettings
+      // 工作区已切换，旧的搜索结果不再适用
+      clearSearchResults()
       await loadWorkspace()
 
       if (files.value.length > 0) {
@@ -222,6 +267,8 @@ function greeting(name) {
     try {
       const newSettings = await invoke<Settings>('connect_webdav', { config })
       settings.value = newSettings
+      // 工作区已切换，旧的搜索结果不再适用
+      clearSearchResults()
       await loadWorkspace()
 
       if (files.value.length > 0) {
@@ -391,6 +438,87 @@ function greeting(name) {
     }
   }
 
+  /**
+   * 打开文件并（可选）把编辑器定位到指定行。
+   * 定位请求通过 revealTarget 传递给编辑器组件，避免直接操作 DOM。
+   */
+  async function openFileAtLine(path: string, line?: number | null) {
+    if (path !== currentFilePath.value) {
+      await openFile(path)
+    }
+    if (line && line > 0) {
+      revealSeq += 1
+      revealTarget.value = { line, seq: revealSeq }
+    }
+  }
+
+  /**
+   * 在当前工作区中全文搜索文件内容。
+   *
+   * 结果按文件分组，每个文件带少量匹配行预览；快速连续输入时旧响应会被丢弃。
+   */
+  async function searchContent(query: string, caseSensitive = false) {
+    const keyword = query.trim()
+    const token = ++searchToken
+
+    if (!keyword) {
+      searchResults.value = []
+      searchTotalMatches.value = 0
+      searchScannedFiles.value = 0
+      searchTruncated.value = false
+      hasSearched.value = false
+      isContentSearching.value = false
+      return
+    }
+
+    if (!hasWorkspace()) {
+      error.value = '请先打开文件夹或连接 WebDAV'
+      return
+    }
+
+    isContentSearching.value = true
+    error.value = null
+
+    try {
+      const path = isWebDAV.value ? '' : (workspaceDir.value || '')
+      const result = await invoke<SearchResponse>('search_workspace', {
+        path,
+        query: keyword,
+        caseSensitive,
+      })
+
+      // 已被更新的搜索取代，丢弃这次结果
+      if (token !== searchToken) return
+
+      searchResults.value = result.files
+      searchTotalMatches.value = result.total_matches
+      searchScannedFiles.value = result.scanned_files
+      searchTruncated.value = result.truncated
+      hasSearched.value = true
+    } catch (e) {
+      if (token !== searchToken) return
+      error.value = `搜索失败: ${e}`
+      searchResults.value = []
+      searchTotalMatches.value = 0
+      searchTruncated.value = false
+      hasSearched.value = true
+    } finally {
+      if (token === searchToken) {
+        isContentSearching.value = false
+      }
+    }
+  }
+
+  function clearSearchResults() {
+    searchToken += 1
+    searchResults.value = []
+    searchTotalMatches.value = 0
+    searchScannedFiles.value = 0
+    searchTruncated.value = false
+    hasSearched.value = false
+    isContentSearching.value = false
+  }
+
   async function saveCurrentFile() {
     if (!currentFilePath.value) return
     if (currentFilePath.value.startsWith('__demo__/')) {
@@ -526,6 +654,14 @@ function greeting(name) {
     error,
     fileIndex,
     isIndexing,
+    // 全文搜索
+    searchResults,
+    searchTotalMatches,
+    searchScannedFiles,
+    searchTruncated,
+    isContentSearching,
+    hasSearched,
+    revealTarget,
     // Methods
     init,
     pickAndSetDirectory,
@@ -534,6 +670,9 @@ function greeting(name) {
     buildFileIndex,
     expandDirectory,
     openFile,
+    openFileAtLine,
+    searchContent,
+    clearSearchResults,
     saveCurrentFile,
     createFile,
     createDirectory,

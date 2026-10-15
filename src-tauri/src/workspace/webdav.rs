@@ -6,7 +6,12 @@ use reqwest::Client;
 use std::time::Duration;
 
 use super::backend::{FileBackend, FileEntry};
+use super::search::{self, SearchResponse};
 
+/// 远端搜索时并发读取的文件数
+const SEARCH_CONCURRENCY: usize = 8;
+
+#[derive(Clone)]
 pub struct WebDavBackend {
     client: Client,
     base_url: String,
@@ -571,5 +576,71 @@ impl FileBackend for WebDavBackend {
             is_dir: false,
             children: None,
         })
+    }
+
+    /// 远端全文搜索：先递归列出文件，再按固定并发批量 GET。
+    ///
+    /// WebDAV 没有服务端搜索能力，只能逐个文件下载，因此这里限制了并发、
+    /// 扫描文件数与返回结果数，避免在大工作区上耗时失控。
+    async fn search_content(
+        &self,
+        root: &str,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Result<SearchResponse, String> {
+        if query.is_empty() {
+            return Ok(SearchResponse::default());
+        }
+
+        let entries = self.list_all_files_recursive(root).await?;
+        let files: Vec<FileEntry> = entries.into_iter().filter(|entry| !entry.is_dir).collect();
+        let mut response = SearchResponse::default();
+
+        for chunk in files.chunks(SEARCH_CONCURRENCY) {
+            if response.files.len() >= search::MAX_FILES
+                || response.total_matches >= search::MAX_TOTAL_MATCHES
+                || response.scanned_files >= search::MAX_SCANNED_FILES
+            {
+                response.truncated = true;
+                break;
+            }
+
+            let mut tasks = tokio::task::JoinSet::new();
+            for (index, entry) in chunk.iter().enumerate() {
+                let backend = self.clone();
+                let path = entry.path.clone();
+                let name = entry.name.clone();
+                tasks.spawn(async move {
+                    let content = backend.read_file(&path).await.ok();
+                    (index, path, name, content)
+                });
+            }
+
+            let mut batch: Vec<(usize, String, String, Option<String>)> = Vec::new();
+            while let Some(joined) = tasks.join_next().await {
+                if let Ok(value) = joined {
+                    batch.push(value);
+                }
+            }
+            batch.sort_by_key(|(index, _, _, _)| *index);
+
+            for (_, path, name, content) in batch {
+                let Some(content) = content else { continue };
+                response.scanned_files += 1;
+
+                let max_matches = search::MAX_TOTAL_MATCHES
+                    .saturating_sub(response.total_matches)
+                    .min(search::MAX_MATCHES_PER_FILE);
+
+                if let Some(hit) =
+                    search::scan_content(&path, &name, &content, query, case_sensitive, max_matches)
+                {
+                    response.total_matches += hit.match_count;
+                    response.files.push(hit);
+                }
+            }
+        }
+
+        Ok(response)
     }
 }
